@@ -1,0 +1,66 @@
+import argparse
+import os.path
+
+
+from fragments_h5.fragments_h5 import build_fragments_h5
+import fragments_h5.logging_local as logging
+
+
+REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(parents=[logging.build_log_parser()])
+    parser.add_argument("input_bam_or_bed", help="bam or bed file to read fragments from")
+    parser.add_argument("output_frags_h5", help="where to write the new fragments h5")
+
+    parser.add_argument(
+        "--reference",
+        choices=sorted(REFERENCE_ANNOTATIONS),
+        required=True,
+        help="The reference genome of input_bam (hg19 or hg38).",
+    )
+    parser.add_argument(
+        "--sample-id",
+        required=True,
+        help="The sample_id of the bam (should correspond to an entry in SampleDataFrame.",
+    )
+    parser.add_argument(
+        "--fasta", default=None, help="Path to a fasta file containing the reference genome.",
+    )
+    parser.add_argument(
+        "--contigs", default=None, nargs="+", help="Restrict building the fragment h5 over these contigs.",
+    )
+
+    parser.add_argument("--set-mapq-255-to-none", action="store_true", help="set mapqs of 255 to None")
+    parser.add_argument("--exclude-strand", default=False, action="store_true", help="Exclude strand info")
+    parser.add_argument(
+        "--read-methyl", default=False, action="store_true", help="Read in methylation frag beds"
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    if args.input_bam_or_bed.endswith(".bam") and (
+            not os.path.isfile(args.input_bam_or_bed + ".bai")
+    ):
+        import subprocess
+        subprocess.run(f"samtools index {args.input_bam_or_bed}", shell=True, check=True)
+
+    build_fragments_h5(
+        args.input_bam_or_bed,
+        args.output_frags_h5,
+        args.sample_id,
+        reference=args.reference,
+        fasta_file=args.fasta,
+        allowed_contigs=args.contigs,
+        set_mapq_255_to_none=args.set_mapq_255_to_none,
+        read_strand=not args.exclude_strand,
+        read_methyl=args.read_methyl,
+    )
+
+
+if __name__ == "__main__":
+    main()
