@@ -481,6 +481,15 @@ def bam_to_align(
 
     contig_lengths = {dict_["SN"]: dict_["LN"] for dict_ in alignment_file.header["SQ"]}
 
+    # if a fasta file has been provided, ensure that any matching contig lengths are the same
+    if fasta_file is not None:
+        fasta_contig_lens = dict(zip(fasta_file.references, fasta_file.lengths))
+        for contig, contig_len in contig_lengths.items():
+            if contig in fasta_contig_lens and fasta_contig_lens[contig] != contig_len:
+                raise ValueError(
+                    f"The bam has contig '{contig}' with a length of '{contig_len}' but the fasta file has a contig length of '{fasta_contig_lens[contig]}' for '{contig}'"
+                )
+
     if stop is None and chrom is not None:
         stop = contig_lengths[chrom]
 
@@ -585,6 +594,7 @@ def bam_to_fragments(
                 ),
                 5,
             )
+            assert False
         else:
             gc = None
 

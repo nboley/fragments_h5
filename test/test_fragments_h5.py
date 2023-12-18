@@ -13,23 +13,23 @@ GREATEST_HITS = [
 
 @pytest.fixture(scope="module")
 def bam_path():
-    return "./data/small.chr6.bam"
+    return os.path.abspath("./data/small.chr6.bam")
 
 
 @pytest.fixture(scope="module")
 def target_bam_path():
-    return "./data/scATAC_breast_v1_chr6_99118615_99121634.hg38.bam"
+    return os.path.abspath("./data/scATAC_breast_v1_chr6_99118615_99121634.hg38.bam")
 
 
 @pytest.fixture(scope="module")
 def fasta_file_path():
-    return "./data/GRCh38.p12.genome.chr3_99110000_99130000.fa"
+    return os.path.abspath("./data/GRCh38.p12.genome.chr3_99110000_99130000.fa")
 
 
 @pytest.fixture(scope="module")
 def small_h5_path(bam_path, fasta_file_path):
     with tempfile.TemporaryDirectory() as dirname:
-        ofname = os.path.join(dirname, bam_path)
+        ofname = os.path.join(dirname, os.path.basename(bam_path) + ".frag.h5")
         build_fragments_h5(
             bam_path, ofname, "test_sample", "hg38", fasta_file=fasta_file_path
         )

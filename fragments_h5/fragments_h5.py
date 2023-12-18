@@ -560,11 +560,12 @@ class FragmentsH5:
                 return_strand=return_strand,
                 return_methyl=return_methyl,
             )
+            assert False
             for frag_start, frag_stop, mapq, gc, strand, num_cpgs, num_meth_cpgs in zip(
                 frag_starts,
                 frag_stops,
-                supp_data.get("mapq", [None] * len(frag_starts)),
-                supp_data.get("gc", [None] * len(frag_starts)),
+                supp_data["mapq"],
+                supp_data["gc"],
                 supp_data.get("strand", [None] * len(frag_starts)),
                 supp_data.get("num_cpgs", [None] * len(frag_starts)),
                 supp_data.get("num_meth_cpgs", [None] * len(frag_starts)),
