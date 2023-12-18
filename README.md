@@ -35,7 +35,7 @@ In [1]: from fragments_h5 import FragmentsH5
 In [2]: fh5 = FragmentsH5("./small.chr6.fragments.h5")                                                                                                                                                                                                                                    
 ```
 
-FragmentsH5 implements a fetch method which returns an iterator over Fragment objects. This is a very slow interface, but can be useful for testing and inspection. Here's an example of grabbing a single 
+FragmentsH5 implements a fetch method which returns an iterator over Fragment objects. This is a very slow interface, but can be useful for testing and inspection. Here's an example of grabbing a single fragment:
 ```
 In [3]: next(fh5.fetch())                                                                                                                                                                                                                                                  
 Out[3]: Fragment(chrom='chr6',start=634343,stop=634501,mapq1=60,mapq2=60,strand='+')
@@ -60,6 +60,20 @@ The returned starts and ends can then be used to construct an array of midpoints
 ## Interface
 
 ## FragmentsH5 Class
+
+### Attributes
+
+**filename**               : return an absolute path to the h5 filename
+**name**                   : alias for filename
+
+**ref**                    : the name of the reference genome
+**sample_id**              : identifier for the sample that this data originates from (set at creation time)
+
+**has_methyl**             : whether or not the fragment h5 contains cpg and converted cpg counts
+**has_strand**             : where or not the fragment h5 conmtains strand information
+
+**max_fragment_length**    : the maximum fragment length stored
+**fragment_length_counts** : an array of fragment counts for each fragment length from 0 to max_fragmnet_length
 
 ### FragmentsH5.init
 
@@ -114,20 +128,6 @@ Returns:
         num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
         num_meth_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragmnet
     }
-
-### Attributes
-
-filename               : return an absolute path to the h5 filename
-name                   : alias for filename
-
-ref                    : the name of the reference genome
-sample_id              : identifier for the sample that this data originates from (set at creation time)
-
-has_methyl             : whether or not the fragment h5 contains cpg and converted cpg counts
-has_strand             : where or not the fragment h5 conmtains strand information
-
-max_fragment_length    : the maximum fragment length stored
-fragment_length_counts : an array of fragment counts for each fragment length from 0 to max_fragmnet_length
 
 ## build-fragments-h5
 ```
