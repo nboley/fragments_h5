@@ -5,6 +5,8 @@ import tempfile
 
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5, bam_to_fragments
 
+DATA_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "./data/")
+
 # importing from datasets was giving me a circular import that i couldn't resolve, so copied this list here
 GREATEST_HITS = [
     ("chr6", 99119615, 99119634),  # CTCF Constitutive
@@ -13,17 +15,17 @@ GREATEST_HITS = [
 
 @pytest.fixture(scope="module")
 def bam_path():
-    return os.path.abspath("./data/small.chr6.bam")
+    return os.path.join(DATA_DIR, "./small.chr6.bam")
 
 
 @pytest.fixture(scope="module")
 def target_bam_path():
-    return os.path.abspath("./data/scATAC_breast_v1_chr6_99118615_99121634.hg38.bam")
+    return os.path.join(DATA_DIR, "./scATAC_breast_v1_chr6_99118615_99121634.hg38.bam")
 
 
 @pytest.fixture(scope="module")
 def fasta_file_path():
-    return os.path.abspath("./data/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
+    return os.path.join(DATA_DIR, "./GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
 
 
 @pytest.fixture(scope="module")
