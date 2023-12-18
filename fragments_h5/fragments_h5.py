@@ -141,8 +141,6 @@ import os
 
 import h5py
 import numpy
-import pandas
-import s3fs
 
 import pysam
 
@@ -264,6 +262,7 @@ class FragmentsH5:
         """
 
         if use_s3_fs:
+            import s3fs
             assert fname.startswith("s3://"), fname
 
             self._s3fs = h5_file = s3fs.S3FileSystem(
@@ -781,10 +780,10 @@ def build_fragments_h5(
             mapq_arr[ff, 1] = 255 if fragment.mapq2 is None else fragment.mapq2
 
             if read_gc:
-                if not (pandas.isnull(fragment.gc) or 0 <= fragment.gc <= 1):
+                if not ((fragment.gc is None or numpy.isnan(fragment.gc)) or 0 <= fragment.gc <= 1):
                     raise ValueError(f"{fragment.gc} is invalid for {fragment}")
                 gc_arr[ff] = (
-                    255 if pandas.isnull(fragment.gc) else int(round(fragment.gc * 254))
+                    255 if (fragment.gc is None or numpy.isnan(fragment.gc)) else int(round(fragment.gc * 254))
                 )
 
             if read_strand:
