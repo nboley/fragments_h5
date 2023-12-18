@@ -46,7 +46,7 @@ def target_h5_path(target_bam_path, fasta_file_path):
         )
 
         cmd = f"""
-        build_fragment_h5.py \
+        build-fragments-h5 \
             {target_bam_path} \
             {ofname} \
             --reference hg38 \
