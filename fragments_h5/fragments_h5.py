@@ -242,10 +242,27 @@ class FragmentsH5:
         self,
         fname,
         mode="r",
-        cache_pointers=True,
+        cache_pointers=False,
         use_s3_fs=False,
         s3_fs_read_timeout=60,
     ):
+        """Load a fragments h5.
+
+        Args:
+            fname (str)             : path to fragment h5 file.
+            mode (str)              : mode to load the h5 file in. (defaults to 'r')
+            cache_pointers (bool)   : Whether or not to load the index into memory. (defaults to False)
+                This is a memory-intensive operation but doubles the fetch speed. This is usually worth
+                it when you're analyzing a single fragment h5 and want to look across lots of regions,
+                but can quickly lead to memory issue.
+            use_s3_fs (bool)        : If set then allow `s3:// ... ` paths to be loaded. Requires s3fs to be installed.
+            s3_fs_read_timeout (int): Tiemout time for s3fs. (Defaults to 60)
+
+        Returns:
+            FragmentsH5 instance
+
+        """
+
         if use_s3_fs:
             assert fname.startswith("s3://"), fname
 
@@ -452,6 +469,8 @@ class FragmentsH5:
             supp_data["mapq"][supp_data["mapq"] == 255] = -1
 
         if return_gc:
+            if "gc" not in self.data[contig]:
+                raise ValueError("The referenced h5 file does not contain gc info.")
             _tmp_gc = numpy.empty(slice_len, dtype="uint8")
             self.data[contig]["gc"].read_direct(_tmp_gc, indices_slice)
             _tmp_gc = _tmp_gc[mask]
@@ -502,7 +521,7 @@ class FragmentsH5:
         stop=None,
         max_frag_len=None,
         return_mapqs=True,
-        return_gc=True,
+        return_gc=False,
         return_strand=True,
         return_methyl=False,
     ):
@@ -533,7 +552,7 @@ class FragmentsH5:
         def _nan_to_none(x):
             # used for cleaning up GC scores
             # we store "None" as NaN b/c floats don't support Nones
-            if numpy.isnan(x):
+            if x is None or numpy.isnan(x):
                 return None
             return x
 
@@ -570,7 +589,7 @@ class FragmentsH5:
                 frag_starts,
                 frag_stops,
                 supp_data["mapq"],
-                supp_data["gc"],
+                supp_data.get("gc", [None] * len(frag_starts)),
                 supp_data.get("strand", [None] * len(frag_starts)),
                 supp_data.get("num_cpgs", [None] * len(frag_starts)),
                 supp_data.get("num_meth_cpgs", [None] * len(frag_starts)),

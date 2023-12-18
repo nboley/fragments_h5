@@ -93,7 +93,7 @@ def assert_fragments_identical(fs1, fs2):
 
 def test_read_all(small_h5_path, bam_path, fasta_file_path):
     fmh5 = FragmentsH5(small_h5_path, "r")
-    h5_fragments = list(fmh5.fetch())
+    h5_fragments = list(fmh5.fetch(return_gc=True))
     bam_fragments = list(
         bam_to_fragments(
             bam_path, max_tlen=fmh5.max_fragment_length, fasta_file=fasta_file_path
@@ -105,7 +105,7 @@ def test_read_all(small_h5_path, bam_path, fasta_file_path):
 def test_fetch(small_h5_path, bam_path, fasta_file_path):
     fmh5 = FragmentsH5(small_h5_path, "r")
     for contig, start, stop in GREATEST_HITS:
-        h5_fragments = list(fmh5.fetch(contig, start, stop))
+        h5_fragments = list(fmh5.fetch(contig, start, stop, return_gc=True))
         bam_fragments = list(
             bam_to_fragments(
                 bam_path,
@@ -125,7 +125,7 @@ def test_fetches_over_target_region(target_h5_path, target_bam_path, fasta_file_
     contig, region_start, region_stop = "chr6", 99119615, 99119634
     for offset in range(0, 501, 100):
         h5_fragments = list(
-            fmh5.fetch(contig, region_start - offset, region_stop + offset)
+            fmh5.fetch(contig, region_start - offset, region_stop + offset, return_gc=True)
         )
         bam_fragments = []
         for fragment in bam_to_fragments(
