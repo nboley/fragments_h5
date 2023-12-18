@@ -194,6 +194,7 @@ with each start. The stops can then be calculated as starts + frag_lens.
 
 BISECTION ALGORITHM DESCRIPTION:
 
+```
 The starts array (f['data/{contig}/starts/]) contains a sorted list of all fragment starts. We wish to find
 all fragments that overlap an interval [i_start, i_stop). This corresponds to finding all fragments [f_start, f_stop)
 such that f_stop > i_start and f_start < i_stop. If we know that the maximum fragment length is <= max_frag_len,
@@ -234,10 +235,11 @@ ADDITIONAL PERFORMANCE IMPROVEMENT FROM THE ABOVE DESCRIPTION:
 The above algorithm performs two index searches, but it actually appears to be faster to perform an to-memory
 copy of the index chosen regions and then do all of the region tuning in the numpy array. That's what we actually
 implement in the the class.
-
+```
 
 ## Notes on Profiling:
 
+```
 During development we did some careful profiling of this code path. I think that it would be possible to squeeze another 10% out of this code, but the majority of the time is spent accessing the h5 arrays. h5 isn't particularly fast and mem-mapped arrays could probably give another 2x speedup or so, but it's probably not worth the maintenance cost.
 
 I'm profiling using chr10 from two bams:
@@ -362,3 +364,4 @@ Capture: Execution time: 1.7130119800567627
 max frag len is 511 and return mapqs and gc:
 WGS: Execution time: 3.130281925201416
 Capture: Execution time: 5.176678895950317
+```
