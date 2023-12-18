@@ -560,7 +560,7 @@ class FragmentsH5:
                 return_strand=return_strand,
                 return_methyl=return_methyl,
             )
-            assert False
+
             for frag_start, frag_stop, mapq, gc, strand, num_cpgs, num_meth_cpgs in zip(
                 frag_starts,
                 frag_stops,

@@ -23,7 +23,7 @@ def target_bam_path():
 
 @pytest.fixture(scope="module")
 def fasta_file_path():
-    return os.path.abspath("./data/GRCh38.p12.genome.chr3_99110000_99130000.fa")
+    return os.path.abspath("./data/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +78,10 @@ def fragments_eq(f1, f2):
         and f1.stop == f2.stop
         and f1.mapq1 == f2.mapq1
         and f1.mapq2 == f2.mapq2
-        and f1.gc - f2.gc < 1e-2
+        and (
+            (f1.gc is None and f2.gc is None)
+            or (f1.gc - f2.gc < 1e-2)
+        )
     )
 
 

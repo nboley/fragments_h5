@@ -594,7 +594,8 @@ def bam_to_fragments(
                 ),
                 5,
             )
-            assert False
+            if numpy.isnan(gc):
+                gc = None
         else:
             gc = None
 
