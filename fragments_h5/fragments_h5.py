@@ -223,19 +223,6 @@ class FragmentsH5:
     def filename(self):
         return self.name
 
-    def add_fragment_length_counts(self):
-        """Calculate the fragment length distribution and save it in the h5 file.
-
-        """
-        logger.info("Adding fragment length counts")
-        fragment_lengths = numpy.zeros(self.max_fragment_length + 1)
-        for contig in self._f["data"]:
-            fls, counts = numpy.unique(
-                self._f["data"][contig]["lengths"], return_counts=True
-            )
-            for fl, count in zip(fls, counts):
-                fragment_lengths[fl] += count
-        self._f["fragment_length_counts"] = fragment_lengths
 
     def cache_pointers(self):
         # load the index into memory
@@ -594,6 +581,20 @@ class FragmentsH5:
         starts, _, _ = self.fetch_array(*args, **kwargs)
         return len(starts)
 
+    def _add_fragment_length_counts(self):
+        """Calculate the fragment length distribution and save it in the h5 file.
+
+        """
+        logger.info("Adding fragment length counts")
+        fragment_lengths = numpy.zeros(self.max_fragment_length + 1)
+        for contig in self._f["data"]:
+            fls, counts = numpy.unique(
+                self._f["data"][contig]["lengths"], return_counts=True
+            )
+            for fl, count in zip(fls, counts):
+                fragment_lengths[fl] += count
+        self._f["fragment_length_counts"] = fragment_lengths
+
 
 def build_fragments_h5(
     input_fname,
@@ -803,5 +804,5 @@ def build_fragments_h5(
     # open an h5 using the class interface in r/w mode so that we can
     # add the fragment length information
     fm_h5 = FragmentsH5(ofname, "r+")
-    fm_h5.add_fragment_length_counts()
+    fm_h5._add_fragment_length_counts()
     fm_h5.close()
