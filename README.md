@@ -4,7 +4,7 @@ Fragments h5 is a python library that implements a fast and memory efficient met
 
 ## Quick Start
 
-First, convert your bam to a fragmnet h5 using the build-fragments-h5 command. 
+First, convert your bam to a fragment h5 using the build-fragments-h5 command. 
 ```
 build-fragments-h5 test/data/small.chr6.bam ./small.chr6.fragments.h5 --sample-id test_data --reference hg38 
 ```
@@ -59,24 +59,24 @@ The returned starts and ends can then be used to construct an array of midpoints
 
 ## Interface
 
-## FragmentsH5 Class
+### FragmentsH5 Class
 
-### Attributes
+#### Attributes
 
-**filename**               : return an absolute path to the h5 filename
-**name**                   : alias for filename
+```
+filename               : return an absolute path to the h5 filename
+name                   : alias for filename
+ref                    : the name of the reference genome
+sample_id              : identifier for the sample that this data originates from (set at creation time)
+has_methyl             : whether or not the fragment h5 contains cpg and converted cpg counts
+has_strand             : where or not the fragment h5 conmtains strand information
+max_fragment_length    : the maximum fragment length stored
+fragment_length_counts : an array of fragment counts for each fragment length from 0 to max_fragment_length
+```
 
-**ref**                    : the name of the reference genome
-**sample_id**              : identifier for the sample that this data originates from (set at creation time)
+#### FragmentsH5.init(...)
 
-**has_methyl**             : whether or not the fragment h5 contains cpg and converted cpg counts
-**has_strand**             : where or not the fragment h5 conmtains strand information
-
-**max_fragment_length**    : the maximum fragment length stored
-**fragment_length_counts** : an array of fragment counts for each fragment length from 0 to max_fragmnet_length
-
-### FragmentsH5.init
-
+```
 Args:
     fname (str)             : path to fragment h5 file.
     mode (str)              : mode to load the h5 file in. (defaults to 'r')
@@ -89,9 +89,11 @@ Args:
 
 Returns:
     FragmentsH5 instance
+```
 
-### FragmentsH5.fetch_array
+#### FragmentsH5.fetch_array(...)
 
+```
 Fetch all fragments that overlap contig:[region_start, region_stop)
 
 Args:
@@ -128,8 +130,9 @@ Returns:
         num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
         num_meth_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragmnet
     }
+```
 
-## build-fragments-h5
+### build-fragments-h5
 ```
 build-fragments-h5 --help
 usage: build-fragments-h5 [-h] [--quiet | --verbose | --debug]
