@@ -305,22 +305,40 @@ class FragmentsH5:
     ):
         """Fetch all fragments that overlap contig:[region_start, region_stop)
 
+        Args:
+            contig (str): contig or chromosome to fetch fragments from
+            region_start (int, optional) : start of region to fetch fragments from (defaults to whole contig)
+            region_stop (int, optional): stop of region to fetch fragments from (defaults to whole contig)
+            max_frag_len (int, optional): max length of fragments to fetch (defaults to no filtering)
+            return_mapqs (bool, optional): return fragments' mapq scores (defaults to False)
+            return_gc (bool, optional): return fragments' gc content (defaults to False)
+            return_strand (bool, optional): return fragments' strand (defaults to False)
+            return_methyl (bool, optional): return fragments' cpg and converted cpg counts (defaults to False)
+            filter_to_midpoint_frags (bool, optional): only return fragments whose midpoints are contained in
+                                                       the filter region (defaults to returning all overlapping
+                                                       fragments)
+
+
         Returns:
-        starts -> numpy.int32 array containing fragment starts
-        stops -> numpy.int32 array containing fragment stops
-        supp_data -> {
-            (only set if return_mapqs is set to True)
-            mapq -> numpy.int32 array with two columns containing mapq1, mapq2
-                     unknown mapqs are set to -1
+            starts -> numpy.int32 array containing fragment starts
+            stops -> numpy.int32 array containing fragment stops
+            supp_data -> {
+                (only set if return_mapqs is set to True)
+                mapq          -> numpy.int32 array with two columns containing mapq1, mapq2
+                                 unknown mapqs are set to -1
 
-            (only set if return_gc is set to True)
-            gc    -> numpy.float32 array containing fraction of fragment that is a g or c
-                     unknown GC's are set to NaN
-                     note that GC is stored in a char internally, so there are only two
-                     significant digits
+                (only set if return_gc is set to True)
+                gc            -> numpy.float32 array containing fraction of fragment that is a g or c
+                                 unknown GC's are set to NaN
+                                 Note: GC is stored in a uint8 so there are only two significant digits
 
-            strand -> numpy.char1 array containing '+' or '-' for the fragment strand
-        }
+                (only set if return_strand is set to True)
+                strand        -> numpy.char1 array containing '+' or '-' for the fragment strand
+
+                (only set if return_gc is set to True)
+                num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
+                num_meth_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragmnet
+            }
 
         See the class docstring for details about the datastructure and search algorithm.
         """
