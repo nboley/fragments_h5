@@ -146,7 +146,7 @@ import s3fs
 
 import pysam
 
-import fragments_h5.logging_local as logging
+import fragments_h5._logging as logging
 from fragments_h5.fragment import bam_to_fragments, Fragment
 
 

@@ -3,7 +3,7 @@ import os.path
 
 
 from fragments_h5.fragments_h5 import build_fragments_h5
-import fragments_h5.logging_local as logging
+import fragments_h5._logging as logging
 
 
 REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]
