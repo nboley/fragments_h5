@@ -126,7 +126,7 @@ Returns:
         (only set if return_strand is set to True)
         strand        -> numpy.char1 array containing '+' or '-' for the fragment strand
 
-        (only set if return_gc is set to True)
+        (only set if return_methyl is set to True)
         num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
         num_meth_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragmnet
     }
