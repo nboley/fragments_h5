@@ -43,14 +43,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.input_bam_or_bed.endswith(".bam") and (
-            not os.path.isfile(args.input_bam_or_bed + ".bai")
+    if args.input_bam.endswith(".bam") and (
+            not os.path.isfile(args.input_bam + ".bai")
     ):
         import subprocess
         subprocess.run(f"samtools index {args.input_bam_or_bed}", shell=True, check=True)
 
     build_fragments_h5(
-        args.input_bam_or_bed,
+        args.input_bam,
         args.output_frags_h5,
         args.sample_id,
         reference=args.reference,
