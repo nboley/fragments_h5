@@ -43,6 +43,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    logging.configure_root_logger_from_args(args)
+
     if args.input_bam.endswith(".bam") and (
             not os.path.isfile(args.input_bam + ".bai")
     ):
