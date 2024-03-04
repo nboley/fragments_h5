@@ -209,8 +209,6 @@ class FragmentsH5:
 
     def close(self):
         self._f.close()
-        if self._s3fs is not None:
-            self._s3fs.close()
 
     @property
     def name(self):
@@ -221,8 +219,8 @@ class FragmentsH5:
     def filename(self):
         return self.name
 
-
     def cache_pointers(self):
+        return
         # load the index into memory
         self.index = {}
         for key in self._f["index"]:
@@ -241,8 +239,6 @@ class FragmentsH5:
         fname,
         mode="r",
         cache_pointers=False,
-        use_s3_fs=False,
-        s3_fs_read_timeout=60,
     ):
         """Load a fragments h5.
 
@@ -253,26 +249,16 @@ class FragmentsH5:
                 This is a memory-intensive operation but doubles the fetch speed. This is usually worth
                 it when you're analyzing a single fragment h5 and want to look across lots of regions,
                 but can quickly lead to memory issue.
-            use_s3_fs (bool)        : If set then allow `s3:// ... ` paths to be loaded. Requires s3fs to be installed.
-            s3_fs_read_timeout (int): Tiemout time for s3fs. (Defaults to 60)
 
         Returns:
             FragmentsH5 instance
 
         """
 
-        if use_s3_fs:
-            import s3fs
-            assert fname.startswith("s3://"), fname
 
-            self._s3fs = h5_file = s3fs.S3FileSystem(
-                config_kwargs=dict(read_timeout=s3_fs_read_timeout)
-            ).open(fname)
-        else:
-            self._s3fs = None
-            h5_file = fname
-
-        self._f = h5py.File(h5_file, mode)
+        self._f_fname = fname
+        self._f_mode = mode
+        self._f = h5py.File(self._f_fname, self._f_mode)
 
         # set the metadata as attributes
         self.contig_lengths = eval(self._f.attrs["_contig_lengths_str"])
@@ -288,6 +274,19 @@ class FragmentsH5:
 
         if cache_pointers:
             self.cache_pointers()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['_f']
+        del state['index']
+        del state['data']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+        self.__dict__['_f'] = h5py.File(state['_f_fname'], state['_f_mode'])
+        self.__dict__['index'] = self.__dict__['_f']["index"]
+        self.__dict__['data'] = self.__dict__['_f']["data"]
 
     @property
     def has_methyl(self):

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fragments-h5"
+version = "1.0.0"
+dependencies = [
+  "numpy",
+  "h5py",
+  "funcsigs",
+  "pysam",
+]
+requires-python = ">=3.6"
+authors = [
+  {name = "Nathan Boley", email = "npboley@gmail.com"},
+]
+maintainers = [
+  {name = "Nathan Boley", email = "npboley@gmail.com"},
+]
+description = "Fast method for storing and querying DNA fragments"
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["fragmentomics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python"
+]
+
+[project.urls]
+Repository = "https://github.com/nboley/fragmentomics_tools"
+
+[project.scripts]
+build-fragments-h5 = "fragments_h5.main:main"
