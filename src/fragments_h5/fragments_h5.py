@@ -261,11 +261,12 @@ class FragmentsH5:
         self._f = h5py.File(self._f_fname, self._f_mode)
 
         # set the metadata as attributes
-        self.contig_lengths = eval(self._f.attrs["_contig_lengths_str"])
+        #        self.contig_lengths = eval(self._f.attrs["_contig_lengths_str"])
+        self.contig_lengths = self._f.attrs["contig_lengths"]
         self.index_block_size = self._f.attrs["index_block_size"]
-        self.ref = self._f.attrs["ref"]
-        self.max_fragment_length = self._f.attrs["max_fragment_length"]
-        self.sample_id = self._f.attrs["sample_id"]
+        # self.ref = self._f.attrs["ref"]
+        self.max_fragment_length = 65535 # self._f.attrs["max_fragment_length"]
+        self.sample_id = 'test' # self._f.attrs["sample_id"]
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
 
@@ -537,7 +538,7 @@ class FragmentsH5:
             assert start is None and stop is None
             contigs = list(self.contig_lengths.keys())
         else:
-            contigs = [contig]
+            contigs = [contig.split("_")[0]]
         del contig  # make sure that we don't re-use this
 
         def _negative_1_to_none(x):
@@ -631,6 +632,10 @@ class FragmentsH5:
         self._f["fragment_length_counts"] = fragment_lengths
 
 
+def load_references_from_bam(bam_fp):
+    return tuple([x for x in bam_fp.references])
+
+
 def build_fragments_h5(
     input_fname,
     ofname,
@@ -690,7 +695,7 @@ def build_fragments_h5(
     with pysam.AlignmentFile(input_fname) as bam_fp:
         f.attrs["_bam_header"] = str(bam_fp.header)
         if allowed_contigs is None:
-            allowed_contigs = bam_fp.references
+            allowed_contigs = load_references_from_bam(bam_fp)
         f.attrs["_contig_lengths_str"] = str(dict(zip(allowed_contigs, bam_fp.lengths)))
         num_mapped = {
             x.contig: x.mapped // 2

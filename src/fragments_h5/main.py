@@ -6,9 +6,6 @@ from fragments_h5.fragments_h5 import build_fragments_h5
 import fragments_h5._logging as logging
 
 
-REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]
-
-
 def parse_args():
     parser = argparse.ArgumentParser(parents=[logging.build_log_parser()])
     parser.add_argument("input_bam", help="bam file to read fragments from")
@@ -16,9 +13,8 @@ def parse_args():
 
     parser.add_argument(
         "--reference",
-        choices=sorted(REFERENCE_ANNOTATIONS),
         required=True,
-        help="The reference genome of input_bam (e.g. hg38).",
+        help="A unique identifier for the reference genome of input_bam (e.g. hg38).",
     )
     parser.add_argument(
         "--sample-id",
@@ -50,7 +46,7 @@ def main():
             not os.path.isfile(args.input_bam + ".bai")
     ):
         import subprocess
-        subprocess.run(f"samtools index {args.input_bam_or_bed}", shell=True, check=True)
+        subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
 
     build_fragments_h5(
         args.input_bam,

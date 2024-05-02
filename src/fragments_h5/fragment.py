@@ -5,6 +5,7 @@ import logging
 import numpy
 import re
 from dataclasses import dataclass
+import csv
 
 import pysam
 
@@ -628,3 +629,15 @@ def bam_to_fragments(
         alignment_file.close()
     if close_fasta_file:
         fasta_file.close()
+
+def tblat_to_fragments(path):
+    with open(path) as fp:
+        for i, record in enumerate(csv.reader(fp, delimiter="\t")):
+            ref = record[1].split("|")[-2]
+            r_start = int(record[8])
+            r_stop = int(record[9]) + 1
+            start = min(r_start, r_stop)
+            stop = max(r_start, r_stop)
+            strand = '+' if r_start < r_stop else "-"
+            yield Fragment(ref, start, stop, strand=strand)
+
