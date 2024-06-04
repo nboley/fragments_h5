@@ -352,7 +352,7 @@ class FragmentsH5:
 
                 (only set if return_methyl is set to True)
                 num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
-                num_meth_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragmnet
+                num_meth_cpgs -> numpy.uint8 array containing number of unconverted cpgs in the fragmnet
             }
 
         See the class docstring for details about the datastructure and search algorithm.

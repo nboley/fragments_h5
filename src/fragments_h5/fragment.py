@@ -611,6 +611,13 @@ def bam_to_fragments(
         else:
             cell_barcode = align.get_tag("CB")
 
+        if align.has_tag("YN"):
+            num_cpgs = align.get_tag("YN")
+            num_meth_cpgs = align.get_tag("YC")
+        else:
+            num_cpgs = None
+            num_meth_cpgs = None
+
         frag = Fragment(
             align.reference_name,
             frag_start,
@@ -620,6 +627,8 @@ def bam_to_fragments(
             gc=gc,
             strand=strand,
             cell_barcode=cell_barcode,
+            num_cpgs=num_cpgs,
+            num_meth_cpgs=num_meth_cpgs,
         )
 
         yield frag

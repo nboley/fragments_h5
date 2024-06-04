@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--set-mapq-255-to-none", action="store_true", help="set mapqs of 255 to None")
     parser.add_argument("--exclude-strand", default=False, action="store_true", help="Exclude strand info")
     parser.add_argument(
-        "--read-methyl", default=False, action="store_true", help="Read in methylation frag beds"
+        "--read-methyl", default=False, action="store_true", help="Parse cpg's and converted cpg's from YN and YC tags"
     )
 
     return parser.parse_args()
@@ -50,7 +50,7 @@ def main():
             not os.path.isfile(args.input_bam + ".bai")
     ):
         import subprocess
-        subprocess.run(f"samtools index {args.input_bam_or_bed}", shell=True, check=True)
+        subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
 
     build_fragments_h5(
         args.input_bam,
