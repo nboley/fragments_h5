@@ -18,6 +18,24 @@ logging.basicConfig(format="%(levelname)s\t%(asctime)-15s\t%(message)s")
 log = logging.getLogger(__name__)
 
 
+@dataclass(slots=True, frozen=True)
+class MethylCounts:
+    unconverted_cytosines: int
+    converted_cytosines: int
+    unconverted_cpgs: int
+    converted_cpgs: int
+
+    _machine = re.compile("unconverted_cytosines:(\d+);converted_cytosines:(\d+);unconverted_cpgs:(\d+);converted_cpgs:(\d+)")
+
+    def items(self):
+        for key in self.__slots__:
+            yield key, getattr(self, key)
+
+    @classmethod
+    def init_from_yn_tag(cls, tag_str):
+        return cls(*map(int, cls._machine.fullmatch(tag_str).groups()))
+
+
 def intervals_intersect(x_start, x_stop, y_start, y_stop):
     """Test whether two closed-open intervals intersect.
 
@@ -138,8 +156,7 @@ class Fragment:
         "gc",
         "strand",
         "cell_barcode",
-        "num_cpgs",
-        "num_meth_cpgs",
+        "methyl_counts",
     ]
 
     def __init__(
@@ -152,8 +169,7 @@ class Fragment:
         gc: Optional[float] = None,
         strand: Optional[str] = None,
         cell_barcode: Optional[str] = None,
-        num_cpgs: Optional[int] = None,
-        num_meth_cpgs: Optional[int] = None,
+        methyl_counts: Optional[dict] = None,
     ):
         assert isinstance(start, (int, numpy.int64, numpy.int32))
         if strand in [b"+", b"-"]:
@@ -600,23 +616,31 @@ def bam_to_fragments(
             gc = None
 
         if align.is_read1:
-            strand = "+"
+            if align.is_forward:
+                strand = "+"
+            elif align.is_reverse:
+                strand = "-"
+            else:
+                assert False
         elif align.is_read2:
-            strand = "-"
+            if align.is_forward:
+                strand = "-"
+            elif align.is_reverse:
+                strand = "+"
+            else:
+                assert False
         else:
             strand = None
 
-        if not align.has_tag("CB"):
-            cell_barcode = None
-        else:
+        if align.has_tag("CB"):
             cell_barcode = align.get_tag("CB")
-
-        if align.has_tag("YN"):
-            num_cpgs = align.get_tag("YN")
-            num_meth_cpgs = align.get_tag("YC")
         else:
-            num_cpgs = None
-            num_meth_cpgs = None
+            cell_barcode = None
+
+        if align.has_tag("YM"):
+            methyl_counts = MethylCounts.init_from_yn_tag(align.get_tag("YM"))
+        else:
+            methyl_counts = None
 
         frag = Fragment(
             align.reference_name,
@@ -627,8 +651,7 @@ def bam_to_fragments(
             gc=gc,
             strand=strand,
             cell_barcode=cell_barcode,
-            num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            methyl_counts=methyl_counts,
         )
 
         yield frag
@@ -637,3 +660,51 @@ def bam_to_fragments(
         alignment_file.close()
     if close_fasta_file:
         fasta_file.close()
+
+def single_end_bam_to_fragments(
+        alignment_file: Union[str, pysam.AlignmentFile],
+        chrom=None,
+        start=None,
+        stop=None,
+        fasta_file: pysam.FastaFile = None,
+        max_tlen=1000,
+        min_mapq=DEFAULT_MIN_MAPQ,
+    ):
+    assert fasta_file is None
+
+    if chrom is None:
+        align_iter = pysam.AlignmentFile(alignment_file)
+    else:
+        align_iter = pysam.AlignmentFile(alignment_file).fetch(
+            chrom,
+        )
+
+    for align in align_iter:
+        if (
+            align.is_qcfail
+            or align.is_supplementary
+            or align.is_duplicate
+            or align.is_unmapped
+            or align.mapq < min_mapq
+        ): continue
+
+        if align.is_forward:
+            strand = "+"
+        elif align.is_reverse:
+            strand = "-"
+        else:
+            assert False
+
+        frag = Fragment(
+            align.reference_name,
+            align.pos,
+            align.aend,
+            mapq1=align.mapq,
+            mapq2=None,
+            gc=None,
+            strand=strand,
+            cell_barcode=None,
+            methyl_counts=None,
+        )
+        yield frag
+    return

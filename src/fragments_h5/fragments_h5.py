@@ -145,11 +145,12 @@ import numpy
 import pysam
 
 import fragments_h5._logging as logging
-from fragments_h5.fragment import bam_to_fragments, Fragment
+from fragments_h5.fragment import bam_to_fragments, single_end_bam_to_fragments, Fragment
 
 
 logger = logging.getLogger(__name__)
 
+methyl_keys = ['num_cpgs', 'num_converted_cpgs', 'num_cytosines', 'num_converted_cytosines']
 
 class FragmentsH5:
     """This data structure is designed for quickly finding all fragments that overlap an interval.
@@ -275,6 +276,14 @@ class FragmentsH5:
         if cache_pointers:
             self.cache_pointers()
 
+    @property
+    def n_fragments(self):
+        return self.fragment_length_counts.sum()
+
+    @property
+    def n_frags(self):
+        return self.n_fragments
+
     def __getstate__(self):
         state = self.__dict__.copy()
         del state['_f']
@@ -315,7 +324,7 @@ class FragmentsH5:
         return_mapqs=False,
         return_gc=False,
         return_strand=False,
-        return_methyl=False,
+        return_methyl=None,
         filter_to_midpoint_frags=False,
     ):
         """Fetch all fragments that overlap contig:[region_start, region_stop)
@@ -363,6 +372,12 @@ class FragmentsH5:
         if region_stop is None:
             region_stop = self.contig_lengths[contig]
 
+        if return_methyl is None:
+            return_methyl = self.has_methyl
+
+        if region_start >= self.contig_lengths[contig]:
+            raise ValueError("Can not query for a region that begins beyond the contig end.")
+
         def empty():
             rv = [numpy.empty(0, "int32"), numpy.empty(0, "int32"), {}]
             if return_mapqs:
@@ -375,7 +390,9 @@ class FragmentsH5:
                 rv[2]["strand"] = numpy.empty(0, "|S1")
             if return_methyl:
                 rv[2]["num_cpgs"] = numpy.empty(0, "uint8")
-                rv[2]["num_meth_cpgs"] = numpy.empty(0, "uint8")
+                rv[2]["num_converted_cpgs"] = numpy.empty(0, "uint8")
+                rv[2]["num_cytosines"] = numpy.empty(0, "uint8")
+                rv[2]["num_converted_cytosines"] = numpy.empty(0, "uint8")
             return rv
 
         if max_frag_len is None:
@@ -491,24 +508,17 @@ class FragmentsH5:
             supp_data["strand"] = supp_data["strand"][mask]
 
         if return_methyl:
-            if ("num_cpgs" not in self.data[contig]) or (
-                "num_meth_cpgs" not in self.data[contig]
-            ):
-                raise ValueError(
-                    "The referenced h5 file does not contain methylation info."
+            for key in methyl_keys:
+                if key not in self.data[contig]:
+                    raise ValueError(
+                        f"The referenced h5 file does not contain methylation info. Hint: missing {key}"
+                    )
+
+                supp_data[key] = numpy.empty(slice_len, dtype="uint8")
+                self.data[contig][key].read_direct(
+                    supp_data[key], source_sel=indices_slice
                 )
-
-            supp_data["num_cpgs"] = numpy.empty(slice_len, dtype="uint8")
-            self.data[contig]["num_cpgs"].read_direct(
-                supp_data["num_cpgs"], source_sel=indices_slice
-            )
-            supp_data["num_cpgs"] = supp_data["num_cpgs"][mask]
-
-            supp_data["num_meth_cpgs"] = numpy.empty(slice_len, dtype="uint8")
-            self.data[contig]["num_meth_cpgs"].read_direct(
-                supp_data["num_meth_cpgs"], source_sel=indices_slice
-            )
-            supp_data["num_meth_cpgs"] = supp_data["num_meth_cpgs"][mask]
+                supp_data[key] = supp_data[key][mask]
 
         return starts, stops, supp_data
 
@@ -521,7 +531,7 @@ class FragmentsH5:
         return_mapqs=True,
         return_gc=False,
         return_strand=True,
-        return_methyl=False,
+        return_methyl=None,
     ):
         """Iterate over all fragments that overlap contig:start-stop.
 
@@ -698,7 +708,7 @@ def build_fragments_h5(
             if allowed_contigs is None or x.contig in allowed_contigs
         }
         num_mapped_cnt = sum(num_mapped.values())
-    input_to_fragments = bam_to_fragments
+    input_to_fragments = single_end_bam_to_fragments # bam_to_fragments
     input_type = "bam"
 
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
@@ -715,10 +725,10 @@ def build_fragments_h5(
         mapq_arr = numpy.zeros((0, 2), dtype="uint8")
         gc_arr = numpy.zeros(0, dtype="uint8")
         strand_arr = numpy.zeros(0, dtype="|S1")
+
         # We record the number of CpGs not in the whole fragment, but the overlap of the pair of sequenced reads
         # Each read has a maximum length of 150, for a total of 300. CpGs take 2 bp, so max number is 150 < 256
-        num_cpgs_arr = numpy.zeros(0, dtype="uint8")
-        num_meth_cpgs_arr = numpy.zeros(0, dtype="uint8")
+        methyl_arrays = {key: numpy.zeros(0, dtype="uint8") for key in methyl_keys}
 
         # if there aren't any fragments then ff is never set. This fixes that edge case.
         ff = 0
@@ -751,8 +761,8 @@ def build_fragments_h5(
                 if read_strand:
                     strand_arr.resize(strand_arr.shape[0] + CHUNK_SIZE)
                 if read_methyl:
-                    num_cpgs_arr.resize(num_cpgs_arr.shape[0] + CHUNK_SIZE)
-                    num_meth_cpgs_arr.resize(num_meth_cpgs_arr.shape[0] + CHUNK_SIZE)
+                    for key in list(methyl_arrays.keys()):
+                        methyl_arrays[key] = numpy.resize(methyl_arrays[key], methyl_arrays[key].shape[0] + CHUNK_SIZE)
 
             # set all of the data
             starts_arr[ff] = fragment.start
@@ -789,8 +799,10 @@ def build_fragments_h5(
                 strand_arr[ff] = fragment.strand
 
             if read_methyl:
-                num_cpgs_arr[ff] = fragment.num_cpgs
-                num_meth_cpgs_arr[ff] = fragment.num_meth_cpgs
+                methyl_arrays['num_cpgs'][ff] = fragment.methyl_counts.unconverted_cpgs + fragment.methyl_counts.converted_cpgs
+                methyl_arrays['num_converted_cpgs'][ff] = fragment.methyl_counts.converted_cpgs
+                methyl_arrays['num_cytosines'][ff] = fragment.methyl_counts.unconverted_cytosines + fragment.methyl_counts.converted_cytosines
+                methyl_arrays['num_converted_cytosines'][ff] = fragment.methyl_counts.converted_cytosines
 
             # Increment number of fragments once the fragment is processed
             ff += 1
@@ -811,14 +823,11 @@ def build_fragments_h5(
                 f"data/{contig}/strand", data=strand_arr[: ff + 1], dtype="|S1"
             )
         if read_methyl:
-            f.create_dataset(
-                f"data/{contig}/num_cpgs", data=num_cpgs_arr[: ff + 1], dtype="uint8"
-            )
-            f.create_dataset(
-                f"data/{contig}/num_meth_cpgs",
-                data=num_meth_cpgs_arr[: ff + 1],
-                dtype="uint8",
-            )
+            for key, val in methyl_arrays.items():
+                f.create_dataset(
+                    f"data/{contig}/{key}", data=val[: ff + 1], dtype="uint8"
+                )
+
 
     logger.info("Creating index")
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
