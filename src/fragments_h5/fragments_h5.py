@@ -708,7 +708,7 @@ def build_fragments_h5(
             if allowed_contigs is None or x.contig in allowed_contigs
         }
         num_mapped_cnt = sum(num_mapped.values())
-    input_to_fragments = single_end_bam_to_fragments # bam_to_fragments
+    input_to_fragments =  bam_to_fragments # single_end_bam_to_fragments #
     input_type = "bam"
 
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
