@@ -495,7 +495,7 @@ class FragmentsH5:
             # cast to a float, and re-scale
             _tmp_gc = _tmp_gc.astype("float32", copy=False) / 254.0
             # set all of the "None's" to NaN
-            _tmp_gc[gc_none_mask] = numpy.NaN
+            _tmp_gc[gc_none_mask] = numpy.nan
             supp_data["gc"] = _tmp_gc
 
         if return_strand:
@@ -610,8 +610,8 @@ class FragmentsH5:
                     mapq2=_negative_1_to_none(mapq[1]),
                     gc=_nan_to_none(gc),
                     strand=_optional_binary_to_strand(strand),
-                    num_cpgs=num_cpgs,
-                    num_meth_cpgs=num_meth_cpgs,
+                    #num_cpgs=num_cpgs,
+                    #num_meth_cpgs=num_meth_cpgs,
                 )
 
     def fetch_counts(self, *args, **kwargs):
@@ -652,6 +652,8 @@ def build_fragments_h5(
     # file containing information about the cell barcodes
     read_strand=True,
     read_methyl=False,
+    # treat the bam as single ended reads
+    single_end=False,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -668,6 +670,9 @@ def build_fragments_h5(
     MAX_FRAG_LENGTH = 65535
     # this parameter is for dynamically resizing the array as it grows
     CHUNK_SIZE = 1000000
+
+    if single_end and read_methyl:
+        raise NotImplementedError("Methylation tag parsing is not currently implemented for single ended reads")
 
     if fasta_file is not None:
         if isinstance(fasta_file, (str, bytes)):
@@ -708,7 +713,10 @@ def build_fragments_h5(
             if allowed_contigs is None or x.contig in allowed_contigs
         }
         num_mapped_cnt = sum(num_mapped.values())
-    input_to_fragments =  bam_to_fragments # single_end_bam_to_fragments #
+    if single_end:
+        input_to_fragments = single_end_bam_to_fragments
+    else:
+        input_to_fragments =  bam_to_fragments
     input_type = "bam"
 
     contig_lengths = eval(f.attrs["_contig_lengths_str"])

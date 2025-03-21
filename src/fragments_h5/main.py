@@ -37,6 +37,9 @@ def parse_args():
     parser.add_argument(
         "--read-methyl", default=False, action="store_true", help="Parse cpg's and converted cpg's from YN and YC tags"
     )
+    parser.add_argument(
+        "--single-end", default=False, action="store_true", help="Sequencing is single ended (useful for long read technologies)"
+    )
 
     return parser.parse_args()
 
@@ -62,6 +65,7 @@ def main():
         set_mapq_255_to_none=args.set_mapq_255_to_none,
         read_strand=not args.exclude_strand,
         read_methyl=args.read_methyl,
+        single_end=args.single_end
     )
 
 
