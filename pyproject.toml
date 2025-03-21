@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/nboley/fragmentomics_tools"
+Repository = "https://github.com/nboley/fragments_h5"
 
 [project.scripts]
 build-fragments-h5 = "fragments_h5.main:main"
