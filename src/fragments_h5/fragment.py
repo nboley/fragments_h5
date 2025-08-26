@@ -275,9 +275,9 @@ def cigar_fragment_end_matches(cigarstring, is_reverse):
     False
     """
     if is_reverse:
-        return cigarstring.endswith("M")
+        return cigarstring.endswith("M") or cigarstring.endswith("=")
     else:
-        return bool(re.search(r"^\d+M", cigarstring))
+        return bool(re.search(r"^\d+(M|=)", cigarstring))
 
 
 def alignment_to_fragment_start_stop(align):
