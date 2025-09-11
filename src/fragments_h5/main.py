@@ -1,6 +1,7 @@
 import argparse
 import os.path
 
+import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5
 import fragments_h5._logging as logging
@@ -49,11 +50,10 @@ def main():
 
     logging.configure_root_logger_from_args(args)
 
-    if args.input_bam.endswith(".bam") and (
-            not os.path.isfile(args.input_bam + ".bai")
-    ):
-        import subprocess
-        subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
+    with pysam.AlignmentFile(args.input_bam) as bam:
+        if not bam.has_index():
+            import subprocess
+            subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
 
     build_fragments_h5(
         args.input_bam,
