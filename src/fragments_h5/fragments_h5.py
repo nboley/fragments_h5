@@ -266,7 +266,6 @@ class FragmentsH5:
         self.index_block_size = self._f.attrs["index_block_size"]
         self.ref = self._f.attrs["ref"]
         self.max_fragment_length = self._f.attrs["max_fragment_length"]
-        self.sample_id = self._f.attrs["sample_id"]
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
 
@@ -644,7 +643,6 @@ class FragmentsH5:
 def build_fragments_h5(
     input_fname,
     ofname,
-    sample_id,
     reference,
     fasta_file=None,
     allowed_contigs=None,
@@ -693,7 +691,6 @@ def build_fragments_h5(
     f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
     f.attrs["ref"] = reference
     f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
-    f.attrs["sample_id"] = sample_id
 
     # save metadata about the bam into the h5.
     # In particular, find the contigs and lengths, and save them into the h5.
@@ -747,19 +744,19 @@ def build_fragments_h5(
             if ff % CHUNK_SIZE == 0:
                 count += CHUNK_SIZE
                 logger.debug(
-                    f"Finished processing {sample_id} through position "
+                    f"Finished processing through position "
                     f"{count}/{num_mapped_cnt} "
                     f"({round(100*count/num_mapped_cnt, 2)})"
                 )
                 if input_type == "bam":
                     logger.debug(
-                        f"Finished processing {sample_id} through position "
+                        f"Finished processing through position "
                         f"{count}/{sum(num_mapped.values())} "
                         f"({round(100*count/sum(num_mapped.values()), 2)})"
                     )
                 if input_type == "bed":
                     logger.debug(
-                        f"Finished processing {sample_id} through position {count}"
+                        f"Finished processing through position {count}"
                     )
                 starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
                 lengths_arr.resize(lengths_arr.shape[0] + CHUNK_SIZE)

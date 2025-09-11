@@ -22,11 +22,6 @@ def parse_args():
         help="The reference genome of input_bam (e.g. hg38).",
     )
     parser.add_argument(
-        "--sample-id",
-        required=True,
-        help="Unique identifier (typically a sample id or cell type).",
-    )
-    parser.add_argument(
         "--fasta", default=None, help="Path to a fasta file containing the reference genome.",
     )
     parser.add_argument(
@@ -58,7 +53,6 @@ def main():
     build_fragments_h5(
         args.input_bam,
         args.output_frags_h5,
-        args.sample_id,
         reference=args.reference,
         fasta_file=args.fasta,
         allowed_contigs=args.contigs,
