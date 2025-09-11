@@ -33,7 +33,7 @@ def small_h5_path(bam_path, fasta_file_path):
     with tempfile.TemporaryDirectory() as dirname:
         ofname = os.path.join(dirname, os.path.basename(bam_path) + ".frag.h5")
         build_fragments_h5(
-            bam_path, ofname, "hg38", fasta_file=fasta_file_path
+            bam_path, ofname, fasta_file=fasta_file_path
         )
         yield ofname
 
@@ -49,7 +49,6 @@ def target_h5_path(target_bam_path, fasta_file_path):
         build-fragments-h5 \
             {target_bam_path} \
             {ofname} \
-            --reference hg38 \
             --contigs chr6 \
             --fasta {fasta_file_path} \
             --verbose \

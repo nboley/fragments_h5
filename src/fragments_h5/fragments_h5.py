@@ -264,7 +264,6 @@ class FragmentsH5:
         # set the metadata as attributes
         self.contig_lengths = eval(self._f.attrs["_contig_lengths_str"])
         self.index_block_size = self._f.attrs["index_block_size"]
-        self.ref = self._f.attrs["ref"]
         self.max_fragment_length = self._f.attrs["max_fragment_length"]
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
@@ -643,7 +642,6 @@ class FragmentsH5:
 def build_fragments_h5(
     input_fname,
     ofname,
-    reference,
     fasta_file=None,
     allowed_contigs=None,
     set_mapq_255_to_none=False,
@@ -689,7 +687,6 @@ def build_fragments_h5(
 
     # Add the attributes
     f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
-    f.attrs["ref"] = reference
     f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
 
     # save metadata about the bam into the h5.
