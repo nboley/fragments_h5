@@ -719,6 +719,10 @@ def build_fragments_h5(
     count = 0
     logger.info("Loading fragments for insertion into h5")
     for contig_i, (contig, contig_length) in enumerate(contig_lengths.items()):
+        # skip contigs with zero mapped reads
+        if num_mapped[contig] == 0:
+            continue
+
         logger.info(f"Converting {contig} ({contig_i+1}/{len(contig_lengths)})")
         # initialize all of the storage arrays
         # we do this in numpy arrays that we copy into the h5 for performance reasons
@@ -809,6 +813,10 @@ def build_fragments_h5(
             # Increment number of fragments once the fragment is processed
             ff += 1
 
+        # do not add contigs without valid mappings
+        if ff == 0:
+            continue
+
         # move the data into the h5 file
         f.create_dataset(
             f"data/{contig}/starts", data=starts_arr[: ff + 1], dtype="int32"
@@ -831,12 +839,13 @@ def build_fragments_h5(
                 )
 
 
+
     logger.info("Creating index")
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
     # Build the index
     # See the class notes for a description of the index
-    for contig, contig_length in contig_lengths.items():
-        block_indices = numpy.array(list(range(0, contig_length, INDEX_BLOCK_SIZE)))
+    for contig in f["data"]:
+        block_indices = numpy.array(list(range(0, contig_lengths[contig], INDEX_BLOCK_SIZE)))
         index_poss = numpy.searchsorted(
             f[f"data/{contig}/starts"][:], block_indices, side="left"
         )
