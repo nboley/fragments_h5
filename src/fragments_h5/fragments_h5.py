@@ -152,6 +152,8 @@ logger = logging.getLogger(__name__)
 
 methyl_keys = ['num_cpgs', 'num_converted_cpgs', 'num_cytosines', 'num_converted_cytosines']
 
+MIN_NUM_READS_FOR_INDEX = 100
+
 class FragmentsH5:
     """This data structure is designed for quickly finding all fragments that overlap an interval.
 
@@ -396,37 +398,46 @@ class FragmentsH5:
         if max_frag_len is None:
             max_frag_len = self.max_fragment_length
 
-        if contig not in self.index:
+        if contig not in self.data:
             return empty()
 
         # find the lower bound position that needs to be included, accounting for the
         # maximum fragment length. The -1 accounts for the fact that the fragments
         # positions are [closed, open)
         lower_bound_inclusive = max(0, region_start - max_frag_len - 1)
-        # find a lower bound for the index of the fragment, using the index
-        fragment_lower_bound_index = self.index[contig][
-            lower_bound_inclusive // self.index_block_size
-        ]
+
         # find the upper bound position that needs to be included. The -1 accounts
         # for the fact that the region bounds are [closed, open)
         upper_bound_inclusive = max(0, region_stop - 1)
-        # find a upper bound for the index of the fragment, using the index
-        fragment_upper_bound_index = self.index[contig][
-            upper_bound_inclusive // self.index_block_size + 1
-        ]
 
-        # if there are no matching fragments
-        if fragment_upper_bound_index == fragment_lower_bound_index:
-            return empty()
+        if contig in self.index:
+            # find a lower bound for the index of the fragment, using the index
+            fragment_lower_bound_index = self.index[contig][
+                lower_bound_inclusive // self.index_block_size
+            ]
+            # find a upper bound for the index of the fragment, using the index
+            fragment_upper_bound_index = self.index[contig][
+                upper_bound_inclusive // self.index_block_size + 1
+            ]
 
-        # find the subset of the array that is known from the index to contain all of the fragments
-        sub_array = numpy.empty(
-            fragment_upper_bound_index - fragment_lower_bound_index, dtype="int32"
-        )
-        self.data[contig]["starts"].read_direct(
-            sub_array,
-            source_sel=numpy.s_[fragment_lower_bound_index:fragment_upper_bound_index],
-        )
+            # if there are no matching fragments
+            if fragment_upper_bound_index == fragment_lower_bound_index:
+                return empty()
+
+            # find the subset of the array that is known from the index to contain all of the fragments
+            sub_array = numpy.empty(
+                fragment_upper_bound_index - fragment_lower_bound_index, dtype="int32"
+            )
+
+            # read the subset of starts that meet the filter criteria into subarray
+            self.data[contig]["starts"].read_direct(
+                sub_array,
+                source_sel=numpy.s_[fragment_lower_bound_index:fragment_upper_bound_index],
+            )
+        else:
+            # if this contig isn't indexed for some reason then just read the index array
+            sub_array = self.data[contig]["starts"]
+
 
         start_index = numpy.searchsorted(sub_array, lower_bound_inclusive, side="left")
         stop_index = numpy.searchsorted(sub_array, upper_bound_inclusive, side="right")
@@ -845,6 +856,14 @@ def build_fragments_h5(
     # Build the index
     # See the class notes for a description of the index
     for contig in f["data"]:
+        # skip contigs that are shorter than the index block length
+        # the indexing doesn't do anything if we're always still reading the full contig
+        if contig_lengths[contig] <= INDEX_BLOCK_SIZE:
+            continue
+        # skip contigs with too few reads.
+        if len(f[f"data/{contig}/starts"]) < MIN_NUM_READS_FOR_INDEX:
+            continue
+
         block_indices = numpy.array(list(range(0, contig_lengths[contig], INDEX_BLOCK_SIZE)))
         index_poss = numpy.searchsorted(
             f[f"data/{contig}/starts"][:], block_indices, side="left"
