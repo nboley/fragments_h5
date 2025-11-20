@@ -8,8 +8,9 @@ from dataclasses import dataclass
 
 import pysam
 
-
 from typing import Union, Optional
+
+from sequence import one_hot_encode_sequences
 
 DEFAULT_MIN_MAPQ = 0
 
@@ -78,7 +79,7 @@ def intervals_intersect_with_none(x_start, x_stop, y_start, y_stop):
     return intervals_intersect(x_start, x_stop, y_start, y_stop)
 
 
-def get_percent_gc(seq):
+def get_percent_gc_slow(seq):
     """
     >>> get_percent_gc('ACTG')
     0.5
@@ -93,7 +94,7 @@ def get_percent_gc(seq):
     ...
     AssertionError: Counter({'H': 1}) contains unexpected characters...
     """
-    c = Counter(seq)
+    c = Counter(seq.upper())
     try:
         gc = c.pop("G", 0) + c.pop("C", 0)
         at = c.pop("A", 0) + c.pop("T", 0)
@@ -406,7 +407,7 @@ def bam_to_align(
 
 def bam_to_fragments(
     alignment_file: Union[str, pysam.AlignmentFile],
-    chrom=None,
+    chrom,
     start=None,
     stop=None,
     fasta_file: pysam.FastaFile = None,
@@ -424,6 +425,21 @@ def bam_to_fragments(
         close_fasta_file = True
     else:
         close_fasta_file = False
+
+    if fasta_file is not None:
+        contig_seq = fasta_file.fetch(chrom)
+        # contig_seq = one_hot_encode_sequences([contig_seq.encode().ravel()])
+        # we add an 'a' to the beginning of the seqeunce because the fragment interval is open closed
+        # for example, image that we have a contig with sequence ccccaaaaaa (1 c's and 4 a's and 5 c's) and a fragment
+        # with a start of 0 and an end of 1 (a one basepair fragment with sequence 'c'). The cumsum is
+        #    x =  array([1., 1., 1., 1., 1., 2., 3., 4., 5., 6.], dtype=float32)
+        # so x[1] - x[0] == 1 - 1 == 0
+        # padding the beginning with zero fixes this edge condition
+        seq = one_hot_encode_sequences([('a' + contig_seq).encode()])[0]
+        g_or_c_cumsum = seq[:, (1,2)].sum(axis=1).cumsum()
+
+    else:
+        contig_seq = None
 
     align_iter = bam_to_align(
         alignment_file=alignment_file,
@@ -444,14 +460,10 @@ def bam_to_fragments(
             continue
 
         if fasta_file is not None:
-            gc = round(
-                get_percent_gc(
-                    fasta_file.fetch(align.reference_name, frag_start, frag_stop)
-                ),
-                5,
-            )
-            if numpy.isnan(gc):
+            if frag_stop == frag_start:
                 gc = None
+            else:
+                gc = round(float(g_or_c_cumsum[frag_stop] - g_or_c_cumsum[frag_start])/float(frag_stop - frag_start), 5)
         else:
             gc = None
 

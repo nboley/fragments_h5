@@ -6,26 +6,11 @@ import pysam
 from fragments_h5.fragments_h5 import build_fragments_h5
 import fragments_h5._logging as logging
 
-
-REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]
-
-
 def parse_args():
     parser = argparse.ArgumentParser(parents=[logging.build_log_parser()])
     parser.add_argument("input_bam", help="bam file to read fragments from")
     parser.add_argument("output_frags_h5", help="where to write the new fragments h5")
 
-    parser.add_argument(
-        "--reference",
-        choices=sorted(REFERENCE_ANNOTATIONS),
-        required=True,
-        help="The reference genome of input_bam (e.g. hg38).",
-    )
-    parser.add_argument(
-        "--sample-id",
-        required=True,
-        help="Unique identifier (typically a sample id or cell type).",
-    )
     parser.add_argument(
         "--fasta", default=None, help="Path to a fasta file containing the reference genome.",
     )
@@ -58,8 +43,6 @@ def main():
     build_fragments_h5(
         args.input_bam,
         args.output_frags_h5,
-        args.sample_id,
-        reference=args.reference,
         fasta_file=args.fasta,
         allowed_contigs=args.contigs,
         set_mapq_255_to_none=args.set_mapq_255_to_none,

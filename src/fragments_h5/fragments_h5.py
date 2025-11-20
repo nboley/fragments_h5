@@ -152,6 +152,8 @@ logger = logging.getLogger(__name__)
 
 methyl_keys = ['num_cpgs', 'num_converted_cpgs', 'num_cytosines', 'num_converted_cytosines']
 
+MIN_NUM_READS_FOR_INDEX = 100
+
 class FragmentsH5:
     """This data structure is designed for quickly finding all fragments that overlap an interval.
 
@@ -264,9 +266,7 @@ class FragmentsH5:
         # set the metadata as attributes
         self.contig_lengths = eval(self._f.attrs["_contig_lengths_str"])
         self.index_block_size = self._f.attrs["index_block_size"]
-        self.ref = self._f.attrs["ref"]
         self.max_fragment_length = self._f.attrs["max_fragment_length"]
-        self.sample_id = self._f.attrs["sample_id"]
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
 
@@ -300,7 +300,7 @@ class FragmentsH5:
     @property
     def has_methyl(self):
         return any(
-            "num_cpgs" in self.data[contig] for contig in self.contig_lengths.keys()
+            "num_cpgs" in self.data[contig] for contig in self.data.keys()
         )
 
     @property
@@ -312,7 +312,7 @@ class FragmentsH5:
         return any(
             ("strand" in self.data[contig])
             and (len(self.data[contig]["strand"].shape) == 1)
-            for contig in self.contig_lengths.keys()
+            for contig in self.data.keys()
         )
 
     def fetch_array(
@@ -398,37 +398,46 @@ class FragmentsH5:
         if max_frag_len is None:
             max_frag_len = self.max_fragment_length
 
-        if contig not in self.index:
+        if contig not in self.data:
             return empty()
 
         # find the lower bound position that needs to be included, accounting for the
         # maximum fragment length. The -1 accounts for the fact that the fragments
         # positions are [closed, open)
         lower_bound_inclusive = max(0, region_start - max_frag_len - 1)
-        # find a lower bound for the index of the fragment, using the index
-        fragment_lower_bound_index = self.index[contig][
-            lower_bound_inclusive // self.index_block_size
-        ]
+
         # find the upper bound position that needs to be included. The -1 accounts
         # for the fact that the region bounds are [closed, open)
         upper_bound_inclusive = max(0, region_stop - 1)
-        # find a upper bound for the index of the fragment, using the index
-        fragment_upper_bound_index = self.index[contig][
-            upper_bound_inclusive // self.index_block_size + 1
-        ]
 
-        # if there are no matching fragments
-        if fragment_upper_bound_index == fragment_lower_bound_index:
-            return empty()
+        if contig in self.index:
+            # find a lower bound for the index of the fragment, using the index
+            fragment_lower_bound_index = self.index[contig][
+                lower_bound_inclusive // self.index_block_size
+            ]
+            # find a upper bound for the index of the fragment, using the index
+            fragment_upper_bound_index = self.index[contig][
+                upper_bound_inclusive // self.index_block_size + 1
+            ]
 
-        # find the subset of the array that is known from the index to contain all of the fragments
-        sub_array = numpy.empty(
-            fragment_upper_bound_index - fragment_lower_bound_index, dtype="int32"
-        )
-        self.data[contig]["starts"].read_direct(
-            sub_array,
-            source_sel=numpy.s_[fragment_lower_bound_index:fragment_upper_bound_index],
-        )
+            # if there are no matching fragments
+            if fragment_upper_bound_index == fragment_lower_bound_index:
+                return empty()
+
+            # find the subset of the array that is known from the index to contain all of the fragments
+            sub_array = numpy.empty(
+                fragment_upper_bound_index - fragment_lower_bound_index, dtype="int32"
+            )
+
+            # read the subset of starts that meet the filter criteria into subarray
+            self.data[contig]["starts"].read_direct(
+                sub_array,
+                source_sel=numpy.s_[fragment_lower_bound_index:fragment_upper_bound_index],
+            )
+        else:
+            # if this contig isn't indexed for some reason then just read the index array
+            sub_array = self.data[contig]["starts"]
+
 
         start_index = numpy.searchsorted(sub_array, lower_bound_inclusive, side="left")
         stop_index = numpy.searchsorted(sub_array, upper_bound_inclusive, side="right")
@@ -644,8 +653,6 @@ class FragmentsH5:
 def build_fragments_h5(
     input_fname,
     ofname,
-    sample_id,
-    reference,
     fasta_file=None,
     allowed_contigs=None,
     set_mapq_255_to_none=False,
@@ -691,9 +698,7 @@ def build_fragments_h5(
 
     # Add the attributes
     f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
-    f.attrs["ref"] = reference
     f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
-    f.attrs["sample_id"] = sample_id
 
     # save metadata about the bam into the h5.
     # In particular, find the contigs and lengths, and save them into the h5.
@@ -725,6 +730,10 @@ def build_fragments_h5(
     count = 0
     logger.info("Loading fragments for insertion into h5")
     for contig_i, (contig, contig_length) in enumerate(contig_lengths.items()):
+        # skip contigs with zero mapped reads
+        if num_mapped[contig] == 0:
+            continue
+
         logger.info(f"Converting {contig} ({contig_i+1}/{len(contig_lengths)})")
         # initialize all of the storage arrays
         # we do this in numpy arrays that we copy into the h5 for performance reasons
@@ -747,19 +756,19 @@ def build_fragments_h5(
             if ff % CHUNK_SIZE == 0:
                 count += CHUNK_SIZE
                 logger.debug(
-                    f"Finished processing {sample_id} through position "
+                    f"Finished processing through position "
                     f"{count}/{num_mapped_cnt} "
                     f"({round(100*count/num_mapped_cnt, 2)})"
                 )
                 if input_type == "bam":
                     logger.debug(
-                        f"Finished processing {sample_id} through position "
+                        f"Finished processing through position "
                         f"{count}/{sum(num_mapped.values())} "
                         f"({round(100*count/sum(num_mapped.values()), 2)})"
                     )
                 if input_type == "bed":
                     logger.debug(
-                        f"Finished processing {sample_id} through position {count}"
+                        f"Finished processing through position {count}"
                     )
                 starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
                 lengths_arr.resize(lengths_arr.shape[0] + CHUNK_SIZE)
@@ -815,34 +824,45 @@ def build_fragments_h5(
             # Increment number of fragments once the fragment is processed
             ff += 1
 
-        # move the data into the h5 file
-        f.create_dataset(
-            f"data/{contig}/starts", data=starts_arr[: ff + 1], dtype="int32"
-        )
-        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
-        f.create_dataset(
-            f"data/{contig}/lengths", data=lengths_arr[: ff + 1], dtype="uint16"
-        )
-        f.create_dataset(f"data/{contig}/mapq", data=mapq_arr[: ff + 1], dtype="uint8")
-        if read_gc:
-            f.create_dataset(f"data/{contig}/gc", data=gc_arr[: ff + 1], dtype="uint8")
-        if read_strand:
+        # do not add contigs without valid mappings
+        if ff == 0:
+            continue
+
+        def mk_dataset(key, data, dtype):
             f.create_dataset(
-                f"data/{contig}/strand", data=strand_arr[: ff + 1], dtype="|S1"
+                key, data=data[: ff + 1], dtype=dtype,
+                compression="gzip", compression_opts=4, chunks=True
             )
+
+        # move the data into the h5 file
+        mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
+        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
+
+        mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
+        mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
+        if read_gc:
+            mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
+        if read_strand:
+            mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
         if read_methyl:
             for key, val in methyl_arrays.items():
-                f.create_dataset(
-                    f"data/{contig}/{key}", data=val[: ff + 1], dtype="uint8"
-                )
+                mk_dataset(f"data/{contig}/{key}", val, "uint8")
 
 
     logger.info("Creating index")
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
     # Build the index
     # See the class notes for a description of the index
-    for contig, contig_length in contig_lengths.items():
-        block_indices = numpy.array(list(range(0, contig_length, INDEX_BLOCK_SIZE)))
+    for contig in f["data"]:
+        # skip contigs that are shorter than the index block length
+        # the indexing doesn't do anything if we're always still reading the full contig
+        if contig_lengths[contig] <= INDEX_BLOCK_SIZE:
+            continue
+        # skip contigs with too few reads.
+        if len(f[f"data/{contig}/starts"]) < MIN_NUM_READS_FOR_INDEX:
+            continue
+
+        block_indices = numpy.array(list(range(0, contig_lengths[contig], INDEX_BLOCK_SIZE)))
         index_poss = numpy.searchsorted(
             f[f"data/{contig}/starts"][:], block_indices, side="left"
         )
