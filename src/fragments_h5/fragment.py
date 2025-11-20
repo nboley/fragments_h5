@@ -405,6 +405,37 @@ def bam_to_align(
         fasta_file.close()
 
 
+def get_g_or_c_cumsum(fasta_file, chrom):
+    close_fasta_file = False
+
+    if fasta_file is None:
+        return None
+
+    if isinstance(fasta_file, (str, bytes)):
+        fasta_file = pysam.FastaFile(fasta_file)
+        close_fasta_file = True
+
+    # ignore GC if the contig isn't in the fasta file
+    if chrom not in fasta_file:
+        if close_fasta_file: fasta_file.close()
+        return None
+
+    contig_seq = fasta_file.fetch(chrom)
+    # contig_seq = one_hot_encode_sequences([contig_seq.encode().ravel()])
+    # we add an 'a' to the beginning of the seqeunce because the fragment interval is open closed
+    # for example, image that we have a contig with sequence ccccaaaaaa (1 c's and 4 a's and 5 c's) and a fragment
+    # with a start of 0 and an end of 1 (a one basepair fragment with sequence 'c'). The cumsum is
+    #    x =  array([1., 1., 1., 1., 1., 2., 3., 4., 5., 6.], dtype=float32)
+    # so x[1] - x[0] == 1 - 1 == 0
+    # padding the beginning with zero fixes this edge condition
+    seq = one_hot_encode_sequences([('a' + contig_seq).encode()])[0]
+    g_or_c_cumsum = seq[:, (1,2)].sum(axis=1).cumsum()
+
+    if close_fasta_file: fasta_file.close()
+
+    return g_or_c_cumsum
+
+
 def bam_to_fragments(
     alignment_file: Union[str, pysam.AlignmentFile],
     chrom,
@@ -420,26 +451,7 @@ def bam_to_fragments(
     else:
         close_alignment_file = False
 
-    if isinstance(fasta_file, str):
-        fasta_file = pysam.FastaFile(fasta_file)
-        close_fasta_file = True
-    else:
-        close_fasta_file = False
-
-    if fasta_file is not None:
-        contig_seq = fasta_file.fetch(chrom)
-        # contig_seq = one_hot_encode_sequences([contig_seq.encode().ravel()])
-        # we add an 'a' to the beginning of the seqeunce because the fragment interval is open closed
-        # for example, image that we have a contig with sequence ccccaaaaaa (1 c's and 4 a's and 5 c's) and a fragment
-        # with a start of 0 and an end of 1 (a one basepair fragment with sequence 'c'). The cumsum is
-        #    x =  array([1., 1., 1., 1., 1., 2., 3., 4., 5., 6.], dtype=float32)
-        # so x[1] - x[0] == 1 - 1 == 0
-        # padding the beginning with zero fixes this edge condition
-        seq = one_hot_encode_sequences([('a' + contig_seq).encode()])[0]
-        g_or_c_cumsum = seq[:, (1,2)].sum(axis=1).cumsum()
-
-    else:
-        contig_seq = None
+    g_or_c_cumsum = get_g_or_c_cumsum(fasta_file, chrom)
 
     align_iter = bam_to_align(
         alignment_file=alignment_file,
@@ -459,13 +471,11 @@ def bam_to_fragments(
         ):
             continue
 
-        if fasta_file is not None:
-            if frag_stop == frag_start:
-                gc = None
-            else:
-                gc = round(float(g_or_c_cumsum[frag_stop] - g_or_c_cumsum[frag_start])/float(frag_stop - frag_start), 5)
-        else:
+        if g_or_c_cumsum is None or frag_stop == frag_start:
             gc = None
+        else:
+            assert frag_stop > frag_start
+            gc = round(float(g_or_c_cumsum[frag_stop] - g_or_c_cumsum[frag_start])/float(frag_stop - frag_start), 5)
 
         if align.is_read1:
             if align.is_forward:
@@ -510,8 +520,6 @@ def bam_to_fragments(
 
     if close_alignment_file:
         alignment_file.close()
-    if close_fasta_file:
-        fasta_file.close()
 
 def single_end_bam_to_fragments(
         alignment_file: Union[str, pysam.AlignmentFile],
