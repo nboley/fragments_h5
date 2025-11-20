@@ -300,7 +300,7 @@ class FragmentsH5:
     @property
     def has_methyl(self):
         return any(
-            "num_cpgs" in self.data[contig] for contig in self.contig_lengths.keys()
+            "num_cpgs" in self.data[contig] for contig in self.data.keys()
         )
 
     @property
@@ -312,7 +312,7 @@ class FragmentsH5:
         return any(
             ("strand" in self.data[contig])
             and (len(self.data[contig]["strand"].shape) == 1)
-            for contig in self.contig_lengths.keys()
+            for contig in self.data.keys()
         )
 
     def fetch_array(
@@ -828,27 +828,25 @@ def build_fragments_h5(
         if ff == 0:
             continue
 
-        # move the data into the h5 file
-        f.create_dataset(
-            f"data/{contig}/starts", data=starts_arr[: ff + 1], dtype="int32"
-        )
-        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
-        f.create_dataset(
-            f"data/{contig}/lengths", data=lengths_arr[: ff + 1], dtype="uint16"
-        )
-        f.create_dataset(f"data/{contig}/mapq", data=mapq_arr[: ff + 1], dtype="uint8")
-        if read_gc:
-            f.create_dataset(f"data/{contig}/gc", data=gc_arr[: ff + 1], dtype="uint8")
-        if read_strand:
+        def mk_dataset(key, data, dtype):
             f.create_dataset(
-                f"data/{contig}/strand", data=strand_arr[: ff + 1], dtype="|S1"
+                key, data=data[: ff + 1], dtype=dtype,
+                compression="gzip", compression_opts=4, chunks=True
             )
+
+        # move the data into the h5 file
+        mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
+        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
+
+        mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
+        mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
+        if read_gc:
+            mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
+        if read_strand:
+            mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
         if read_methyl:
             for key, val in methyl_arrays.items():
-                f.create_dataset(
-                    f"data/{contig}/{key}", data=val[: ff + 1], dtype="uint8"
-                )
-
+                mk_dataset(f"data/{contig}/{key}", val, "uint8")
 
 
     logger.info("Creating index")

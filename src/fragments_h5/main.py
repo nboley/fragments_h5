@@ -6,7 +6,6 @@ import pysam
 from fragments_h5.fragments_h5 import build_fragments_h5
 import fragments_h5._logging as logging
 
-
 def parse_args():
     parser = argparse.ArgumentParser(parents=[logging.build_log_parser()])
     parser.add_argument("input_bam", help="bam file to read fragments from")

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools >= 61.0"]
+requires = ["setuptools >= 61.0", "Cython", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
   "numpy",
   "h5py",
