@@ -138,6 +138,7 @@ Capture: Execution time: 5.176678895950317
 
 """
 import os
+import tempfile
 
 import h5py
 import numpy
@@ -659,7 +660,7 @@ class FragmentsH5:
         self._f["fragment_length_counts"] = fragment_lengths
 
 
-def build_sub_fragments_h5(input_fname, contig, fasta_file, input_to_fragments, read_gc, read_strand, read_methyl):
+def build_sub_fragments_h5(input_fname, contig, fasta_file, input_to_fragments, read_gc, read_strand, read_methyl, tmp_dir_name):
     """Collect, assemble, and compress all of the fragmnet data for a single contig.
 
     """
@@ -741,7 +742,37 @@ def build_sub_fragments_h5(input_fname, contig, fasta_file, input_to_fragments, 
         # Increment number of fragments once the fragment is processed
         ff += 1
 
-    return starts_arr, lengths_arr, mapq_arr, gc_arr, strand_arr, methyl_arrays, ff
+    # if there are no fragments then there's nothing left to do
+    if ff == 0:
+        return None
+
+    # write the data into the h5 file
+    ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
+    f = h5py.File(ofname, "x")
+
+    # create the h5 storing all of this data
+    def mk_dataset(key, data, dtype):
+        f.create_dataset(
+            key, data=data[: ff + 1], dtype=dtype,
+            compression="gzip", compression_opts=4, chunks=True
+        )
+
+    mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
+    assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
+
+    mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
+    mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
+    if read_gc:
+        mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
+    if read_strand:
+        mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
+    if read_methyl:
+        for key, val in methyl_arrays.items():
+            mk_dataset(f"data/{contig}/{key}", val, "uint8")
+
+    f.close()
+
+    return ofname
 
 
 def build_fragments_h5(
@@ -814,41 +845,31 @@ def build_fragments_h5(
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
-    logger.info("Loading fragments for insertion into h5")
-    for contig_i, (contig, contig_length) in enumerate(contig_lengths.items()):
-        # skip contigs with zero mapped reads
-        if num_mapped[contig] == 0:
-            continue
 
-        starts_arr, lengths_arr, mapq_arr, gc_arr, strand_arr, methyl_arrays, ff = \
-            build_sub_fragments_h5(
-                input_fname, contig, fasta_file, input_to_fragments, read_gc, read_strand, read_methyl
+    # from multiprocessing import Pool
+    sub_dfs = []
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        print(tmp_dir)
+        logger.info("Loading fragments for insertion into h5")
+        for contig_i, (contig, contig_length) in enumerate(contig_lengths.items()):
+            # skip contigs with zero mapped reads
+            if num_mapped[contig] == 0:
+                continue
+
+            # starts_arr, lengths_arr, mapq_arr, gc_arr, strand_arr, methyl_arrays, ff =
+            sub_df_path = build_sub_fragments_h5(
+                input_fname, contig, fasta_file, input_to_fragments,
+                read_gc, read_strand, read_methyl,
+                # "/ssd/test_new_h5/"
+                tmp_dir
             )
+            if sub_df_path is not None:
+                sub_dfs.append((contig, h5py.File(sub_df_path, "r")))
 
-        if ff == 0: continue
-
-        ###################################################################
-        ## TODO -- MOVE THIS INTO WRITER PROCESS
-        def mk_dataset(key, data, dtype):
-            f.create_dataset(
-                key, data=data[: ff + 1], dtype=dtype,
-                compression="gzip", compression_opts=4, chunks=True
-            )
-
-        # move the data into the h5 file
-        mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
-        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
-
-        mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
-        mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
-        if read_gc:
-            mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
-        if read_strand:
-            mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
-        if read_methyl:
-            for key, val in methyl_arrays.items():
-                mk_dataset(f"data/{contig}/{key}", val, "uint8")
-        ###################################################################
+        # merge all of the fragment h5s
+        f.create_group('data')
+        for contig, sub_df in sub_dfs:
+            f.copy(sub_df['data'][contig], f['data'])
 
     logger.info("Creating index")
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
