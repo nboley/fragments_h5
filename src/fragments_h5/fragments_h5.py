@@ -660,11 +660,19 @@ class FragmentsH5:
         self._f["fragment_length_counts"] = fragment_lengths
 
 
-def build_sub_fragments_h5(input_fname, contig, fasta_file, input_to_fragments, read_gc, read_strand, read_methyl, tmp_dir_name):
+def build_sub_fragments_h5(input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, tmp_dir_name):
     """Collect, assemble, and compress all of the fragmnet data for a single contig.
 
     """
     logger.info(f"Converting {contig})")
+
+    if single_end:
+        input_to_fragments = single_end_bam_to_fragments
+    else:
+        input_to_fragments =  bam_to_fragments
+
+    fasta_file = pysam.FastaFile(fasta_filename) if fasta_filename is not None else None
+
     # initialize all of the storage arrays
     # we do this in numpy arrays that we copy into the h5 for performance reasons
     starts_arr = numpy.zeros(0, dtype="int32")
@@ -741,6 +749,9 @@ def build_sub_fragments_h5(input_fname, contig, fasta_file, input_to_fragments, 
 
         # Increment number of fragments once the fragment is processed
         ff += 1
+
+    if fasta_file is not None:
+        fasta_file.close()
 
     # if there are no fragments then there's nothing left to do
     if ff == 0:
@@ -836,10 +847,6 @@ def build_fragments_h5(
             if allowed_contigs is None or x.contig in allowed_contigs
         }
         num_mapped_cnt = sum(num_mapped.values())
-    if single_end:
-        input_to_fragments = single_end_bam_to_fragments
-    else:
-        input_to_fragments =  bam_to_fragments
     input_type = "bam"
 
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
@@ -847,20 +854,21 @@ def build_fragments_h5(
 
 
     # from multiprocessing import Pool
+    args = list(contig_lengths.keys())
+
     sub_dfs = []
     with tempfile.TemporaryDirectory() as tmp_dir:
         print(tmp_dir)
         logger.info("Loading fragments for insertion into h5")
-        for contig_i, (contig, contig_length) in enumerate(contig_lengths.items()):
+        for contig in contig_lengths.keys():
             # skip contigs with zero mapped reads
             if num_mapped[contig] == 0:
                 continue
 
             # starts_arr, lengths_arr, mapq_arr, gc_arr, strand_arr, methyl_arrays, ff =
             sub_df_path = build_sub_fragments_h5(
-                input_fname, contig, fasta_file, input_to_fragments,
+                input_fname, contig, fasta_file.filename, single_end,
                 read_gc, read_strand, read_methyl,
-                # "/ssd/test_new_h5/"
                 tmp_dir
             )
             if sub_df_path is not None:
