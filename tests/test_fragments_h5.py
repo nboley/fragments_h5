@@ -94,7 +94,7 @@ def test_read_all(small_h5_path, bam_path, fasta_file_path):
     h5_fragments = list(fmh5.fetch(return_gc=True))
     bam_fragments = list(
         bam_to_fragments(
-            bam_path, max_tlen=fmh5.max_fragment_length, fasta_file=fasta_file_path
+            bam_path, 'chr6', max_tlen=fmh5.max_fragment_length, fasta_file=fasta_file_path
         )
     )
     assert_fragments_identical(h5_fragments, bam_fragments)
