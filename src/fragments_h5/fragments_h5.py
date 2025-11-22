@@ -138,6 +138,9 @@ Capture: Execution time: 5.176678895950317
 
 """
 import os
+import tempfile
+
+from multiprocessing import Pool
 
 import h5py
 import numpy
@@ -153,6 +156,15 @@ logger = logging.getLogger(__name__)
 methyl_keys = ['num_cpgs', 'num_converted_cpgs', 'num_cytosines', 'num_converted_cytosines']
 
 MIN_NUM_READS_FOR_INDEX = 100
+
+INDEX_BLOCK_SIZE = 5000
+
+# the fragment lengths are stored as a uint16, so the max fragment length is
+# 2**16-1 == 65536-1 == 65535
+MAX_FRAG_LENGTH = 65535
+# this parameter is for dynamically resizing the array as it grows
+CHUNK_SIZE = 1000000
+
 
 class FragmentsH5:
     """This data structure is designed for quickly finding all fragments that overlap an interval.
@@ -650,6 +662,132 @@ class FragmentsH5:
         self._f["fragment_length_counts"] = fragment_lengths
 
 
+def build_sub_fragments_h5(args):
+    """Collect, assemble, and compress all of the fragmnet data for a single contig.
+
+    """
+    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, tmp_dir_name = args
+
+    if single_end:
+        input_to_fragments = single_end_bam_to_fragments
+    else:
+        input_to_fragments =  bam_to_fragments
+
+    fasta_file = pysam.FastaFile(fasta_filename) if fasta_filename is not None else None
+
+    # initialize all of the storage arrays
+    # we do this in numpy arrays that we copy into the h5 for performance reasons
+    starts_arr = numpy.zeros(0, dtype="int32")
+    lengths_arr = numpy.zeros(0, dtype="uint16")
+    mapq_arr = numpy.zeros((0, 2), dtype="uint8")
+    gc_arr = numpy.zeros(0, dtype="uint8")
+    strand_arr = numpy.zeros(0, dtype="|S1")
+
+    # We record the number of CpGs not in the whole fragment, but the overlap of the pair of sequenced reads
+    # Each read has a maximum length of 150, for a total of 300. CpGs take 2 bp, so max number is 150 < 256
+    methyl_arrays = {key: numpy.zeros(0, dtype="uint8") for key in methyl_keys}
+
+    # if there aren't any fragments then ff is never set. This fixes that edge case.
+    ff = 0
+    for fragment in input_to_fragments(
+        input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file
+    ):
+        # if we have filled this chunk then resize the array
+        if ff % CHUNK_SIZE == 0:
+            starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
+            lengths_arr.resize(lengths_arr.shape[0] + CHUNK_SIZE)
+            mapq_arr.resize((mapq_arr.shape[0] + CHUNK_SIZE, 2))
+            if read_gc:
+                gc_arr.resize(gc_arr.shape[0] + CHUNK_SIZE)
+            if read_strand:
+                strand_arr.resize(strand_arr.shape[0] + CHUNK_SIZE)
+            if read_methyl:
+                for key in list(methyl_arrays.keys()):
+                    methyl_arrays[key] = numpy.resize(methyl_arrays[key], methyl_arrays[key].shape[0] + CHUNK_SIZE)
+
+        # set all of the data
+        starts_arr[ff] = fragment.start
+        lengths_arr[ff] = fragment.length
+
+        if fragment.mapq1 == 255:
+            if set_mapq_255_to_none:
+                fragment.mapq1 = None
+            else:
+                assert False, (
+                    f"{fragment} has MAPQ1 of 255. Make sure this is as intended, "
+                    f"and retry with set_mapq_255_to_none=True"
+                )
+        if fragment.mapq2 == 255:
+            if set_mapq_255_to_none:
+                fragment.mapq2 = None
+            else:
+                assert False, (
+                    f"{fragment} has MAPQ2 of 255. Make sure this is as intended,"
+                    f" and retry with set_mapq_255_to_none=True"
+                )
+
+        mapq_arr[ff, 0] = 255 if fragment.mapq1 is None else fragment.mapq1
+        mapq_arr[ff, 1] = 255 if fragment.mapq2 is None else fragment.mapq2
+
+        if read_gc:
+            if not ((fragment.gc is None or numpy.isnan(fragment.gc)) or 0 <= fragment.gc <= 1):
+                raise ValueError(f"{fragment.gc} is invalid for {fragment}")
+            gc_arr[ff] = (
+                255 if (fragment.gc is None or numpy.isnan(fragment.gc)) else int(round(fragment.gc * 254))
+            )
+
+        if read_strand:
+            strand_arr[ff] = fragment.strand
+
+        if read_methyl:
+            methyl_arrays['num_cpgs'][ff] = (
+                fragment.methyl_counts.unconverted_cpgs + fragment.methyl_counts.converted_cpgs
+            )
+            methyl_arrays['num_converted_cpgs'][ff] = fragment.methyl_counts.converted_cpgs
+            methyl_arrays['num_cytosines'][ff] = (
+                fragment.methyl_counts.unconverted_cytosines + fragment.methyl_counts.converted_cytosines
+            )
+            methyl_arrays['num_converted_cytosines'][ff] = fragment.methyl_counts.converted_cytosines
+
+        # Increment number of fragments once the fragment is processed
+        ff += 1
+
+    if fasta_file is not None:
+        fasta_file.close()
+
+    # if there are no fragments then there's nothing left to do
+    if ff == 0:
+        return None, None
+
+    # write the data into the h5 file
+    ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
+    f = h5py.File(ofname, "x")
+
+    # create the h5 storing all of this data
+    def mk_dataset(key, data, dtype):
+        f.create_dataset(
+            key, data=data[: ff + 1], dtype=dtype,
+            compression="gzip", compression_opts=4, chunks=True
+        )
+
+    mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
+    assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
+
+    mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
+    mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
+    if read_gc:
+        mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
+    if read_strand:
+        mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
+    if read_methyl:
+        for key, val in methyl_arrays.items():
+            mk_dataset(f"data/{contig}/{key}", val, "uint8")
+
+    f.close()
+
+    return contig, ofname
+
+
 def build_fragments_h5(
     input_fname,
     ofname,
@@ -661,6 +799,7 @@ def build_fragments_h5(
     read_methyl=False,
     # treat the bam as single ended reads
     single_end=False,
+    num_processes=None,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -670,31 +809,20 @@ def build_fragments_h5(
     aligners follow this so we raise an error by default when we encounter a MAPQ of
     255. This setting overrides that.
     """
-    INDEX_BLOCK_SIZE = 5000
-
-    # the fragment lengths are stored as a uint16, so the max fragment length is
-    # 2**16-1 == 65536-1 == 65535
-    MAX_FRAG_LENGTH = 65535
-    # this parameter is for dynamically resizing the array as it grows
-    CHUNK_SIZE = 1000000
 
     if single_end and read_methyl:
         raise NotImplementedError("Methylation tag parsing is not currently implemented for single ended reads")
 
     if fasta_file is not None:
-        if isinstance(fasta_file, (str, bytes)):
-            fasta_file = pysam.FastaFile(fasta_file)
-        elif isinstance(fasta_file, pysam.FastaFile):
-            pass
-        else:
-            raise TypeError(
-                "'in_fasta_file' type must be a pysam.FastaFile, str, bytes, or None if GC calcs aren't needed."
-            )
+        fasta_file = fasta_file.filename
         read_gc = True
     else:
         read_gc = False
 
     f = h5py.File(ofname, "x")
+
+    # create a data group to store the fragments
+    f.create_group('data')
 
     # Add the attributes
     f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
@@ -718,135 +846,36 @@ def build_fragments_h5(
             if allowed_contigs is None or x.contig in allowed_contigs
         }
         num_mapped_cnt = sum(num_mapped.values())
-    if single_end:
-        input_to_fragments = single_end_bam_to_fragments
-    else:
-        input_to_fragments =  bam_to_fragments
     input_type = "bam"
 
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
-    count = 0
     logger.info("Loading fragments for insertion into h5")
-    for contig_i, (contig, contig_length) in enumerate(contig_lengths.items()):
-        # skip contigs with zero mapped reads
-        if num_mapped[contig] == 0:
-            continue
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        args = []
 
-        logger.info(f"Converting {contig} ({contig_i+1}/{len(contig_lengths)})")
-        # initialize all of the storage arrays
-        # we do this in numpy arrays that we copy into the h5 for performance reasons
-        starts_arr = numpy.zeros(0, dtype="int32")
-        lengths_arr = numpy.zeros(0, dtype="uint16")
-        mapq_arr = numpy.zeros((0, 2), dtype="uint8")
-        gc_arr = numpy.zeros(0, dtype="uint8")
-        strand_arr = numpy.zeros(0, dtype="|S1")
+        for contig in contig_lengths.keys():
+            # skip contigs with zero mapped reads
+            if num_mapped[contig] == 0:
+                continue
 
-        # We record the number of CpGs not in the whole fragment, but the overlap of the pair of sequenced reads
-        # Each read has a maximum length of 150, for a total of 300. CpGs take 2 bp, so max number is 150 < 256
-        methyl_arrays = {key: numpy.zeros(0, dtype="uint8") for key in methyl_keys}
+            args.append((
+                input_fname, contig, fasta_file, single_end,
+                read_gc, read_strand, read_methyl, tmp_dir
+            ))
 
-        # if there aren't any fragments then ff is never set. This fixes that edge case.
-        ff = 0
-        for fragment in input_to_fragments(
-            input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file
-        ):
-            # if we have filled this chunk then resize the array
-            if ff % CHUNK_SIZE == 0:
-                count += CHUNK_SIZE
-                logger.debug(
-                    f"Finished processing through position "
-                    f"{count}/{num_mapped_cnt} "
-                    f"({round(100*count/num_mapped_cnt, 2)})"
-                )
-                if input_type == "bam":
-                    logger.debug(
-                        f"Finished processing through position "
-                        f"{count}/{sum(num_mapped.values())} "
-                        f"({round(100*count/sum(num_mapped.values()), 2)})"
-                    )
-                if input_type == "bed":
-                    logger.debug(
-                        f"Finished processing through position {count}"
-                    )
-                starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
-                lengths_arr.resize(lengths_arr.shape[0] + CHUNK_SIZE)
-                mapq_arr.resize((mapq_arr.shape[0] + CHUNK_SIZE, 2))
-                if read_gc:
-                    gc_arr.resize(gc_arr.shape[0] + CHUNK_SIZE)
-                if read_strand:
-                    strand_arr.resize(strand_arr.shape[0] + CHUNK_SIZE)
-                if read_methyl:
-                    for key in list(methyl_arrays.keys()):
-                        methyl_arrays[key] = numpy.resize(methyl_arrays[key], methyl_arrays[key].shape[0] + CHUNK_SIZE)
+        with Pool(processes=num_processes) as pool:
+            contigs_and_paths = pool.imap_unordered(build_sub_fragments_h5, args)
 
-            # set all of the data
-            starts_arr[ff] = fragment.start
-            lengths_arr[ff] = fragment.length
-
-            if fragment.mapq1 == 255:
-                if set_mapq_255_to_none:
-                    fragment.mapq1 = None
-                else:
-                    assert False, (
-                        f"{fragment} has MAPQ1 of 255. Make sure this is as intended, "
-                        f"and retry with set_mapq_255_to_none=True"
-                    )
-            if fragment.mapq2 == 255:
-                if set_mapq_255_to_none:
-                    fragment.mapq2 = None
-                else:
-                    assert False, (
-                        f"{fragment} has MAPQ2 of 255. Make sure this is as intended,"
-                        f" and retry with set_mapq_255_to_none=True"
-                    )
-
-            mapq_arr[ff, 0] = 255 if fragment.mapq1 is None else fragment.mapq1
-            mapq_arr[ff, 1] = 255 if fragment.mapq2 is None else fragment.mapq2
-
-            if read_gc:
-                if not ((fragment.gc is None or numpy.isnan(fragment.gc)) or 0 <= fragment.gc <= 1):
-                    raise ValueError(f"{fragment.gc} is invalid for {fragment}")
-                gc_arr[ff] = (
-                    255 if (fragment.gc is None or numpy.isnan(fragment.gc)) else int(round(fragment.gc * 254))
-                )
-
-            if read_strand:
-                strand_arr[ff] = fragment.strand
-
-            if read_methyl:
-                methyl_arrays['num_cpgs'][ff] = fragment.methyl_counts.unconverted_cpgs + fragment.methyl_counts.converted_cpgs
-                methyl_arrays['num_converted_cpgs'][ff] = fragment.methyl_counts.converted_cpgs
-                methyl_arrays['num_cytosines'][ff] = fragment.methyl_counts.unconverted_cytosines + fragment.methyl_counts.converted_cytosines
-                methyl_arrays['num_converted_cytosines'][ff] = fragment.methyl_counts.converted_cytosines
-
-            # Increment number of fragments once the fragment is processed
-            ff += 1
-
-        # do not add contigs without valid mappings
-        if ff == 0:
-            continue
-
-        def mk_dataset(key, data, dtype):
-            f.create_dataset(
-                key, data=data[: ff + 1], dtype=dtype,
-                compression="gzip", compression_opts=4, chunks=True
-            )
-
-        # move the data into the h5 file
-        mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
-        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
-
-        mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
-        mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
-        if read_gc:
-            mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
-        if read_strand:
-            mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
-        if read_methyl:
-            for key, val in methyl_arrays.items():
-                mk_dataset(f"data/{contig}/{key}", val, "uint8")
+            # merge all of the fragment h5s
+            for i, (contig, sub_h5_path) in enumerate(contigs_and_paths):
+                # skip contigs with no reads
+                if contig is None: continue
+                # copy the subprocess data into the main h5
+                with h5py.File(sub_h5_path, "r") as sub_h5:
+                    f.copy(sub_h5['data'][contig], f['data'])
+                logger.info(f"Finished Processing {contig} ({i+1}/{len(args)})'")
 
 
     logger.info("Creating index")
