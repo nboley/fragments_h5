@@ -668,8 +668,6 @@ def build_sub_fragments_h5(args):
     """
     input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, tmp_dir_name = args
 
-    logger.info(f"Converting {contig})")
-
     if single_end:
         input_to_fragments = single_end_bam_to_fragments
     else:
@@ -823,6 +821,9 @@ def build_fragments_h5(
 
     f = h5py.File(ofname, "x")
 
+    # create a data group to store the fragments
+    f.create_group('data')
+
     # Add the attributes
     f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
     f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
@@ -850,10 +851,7 @@ def build_fragments_h5(
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
-    args = list(contig_lengths.keys())
-
     logger.info("Loading fragments for insertion into h5")
-    f.create_group('data')
     with tempfile.TemporaryDirectory() as tmp_dir:
         args = []
 
@@ -868,14 +866,16 @@ def build_fragments_h5(
             ))
 
         with Pool(processes=num_processes) as pool:
-            contigs_and_paths = pool.map(build_sub_fragments_h5, args)
+            contigs_and_paths = pool.imap_unordered(build_sub_fragments_h5, args)
 
-        # merge all of the fragment h5s
-        for contig, sub_h5_path in contigs_and_paths:
-            if contig is None: continue
-
-            sub_h5 = h5py.File(sub_h5_path, "r")
-            f.copy(sub_h5['data'][contig], f['data'])
+            # merge all of the fragment h5s
+            for i, (contig, sub_h5_path) in enumerate(contigs_and_paths):
+                # skip contigs with no reads
+                if contig is None: continue
+                # copy the subprocess data into the main h5
+                with h5py.File(sub_h5_path, "r") as sub_h5:
+                    f.copy(sub_h5['data'][contig], f['data'])
+                logger.info(f"Finished Processing {contig} ({i+1}/{len(args)})'")
 
 
     logger.info("Creating index")

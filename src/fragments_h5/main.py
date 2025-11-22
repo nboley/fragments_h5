@@ -27,7 +27,7 @@ def parse_args():
         "--single-end", default=False, action="store_true", help="Sequencing is single ended (useful for long read technologies)"
     )
     parser.add_argument(
-        "--num-processes", default=1, help="Num of processes to use (defaults to 1 -- use 'all' for all cores)"
+        "--num-processes", default='1', help="Num of processes to use (defaults to 1 -- use 'all' for all cores)"
     )
 
     return parser.parse_args()
