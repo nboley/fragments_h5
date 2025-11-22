@@ -51,7 +51,7 @@ def main():
     build_fragments_h5(
         args.input_bam,
         args.output_frags_h5,
-        fasta_file=args.fasta,
+        fasta_filename=args.fasta,
         allowed_contigs=args.contigs,
         set_mapq_255_to_none=args.set_mapq_255_to_none,
         read_strand=not args.exclude_strand,

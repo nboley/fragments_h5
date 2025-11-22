@@ -791,7 +791,7 @@ def build_sub_fragments_h5(args):
 def build_fragments_h5(
     input_fname,
     ofname,
-    fasta_file=None,
+    fasta_filename=None,
     allowed_contigs=None,
     set_mapq_255_to_none=False,
     # file containing information about the cell barcodes
@@ -813,8 +813,7 @@ def build_fragments_h5(
     if single_end and read_methyl:
         raise NotImplementedError("Methylation tag parsing is not currently implemented for single ended reads")
 
-    if fasta_file is not None:
-        fasta_file = fasta_file.filename
+    if fasta_filename is not None:
         read_gc = True
     else:
         read_gc = False
@@ -861,7 +860,7 @@ def build_fragments_h5(
                 continue
 
             args.append((
-                input_fname, contig, fasta_file, single_end,
+                input_fname, contig, fasta_filename, single_end,
                 read_gc, read_strand, read_methyl, tmp_dir
             ))
 
