@@ -140,6 +140,8 @@ Capture: Execution time: 5.176678895950317
 import os
 import tempfile
 
+from multiprocessing import Pool
+
 import h5py
 import numpy
 
@@ -660,10 +662,12 @@ class FragmentsH5:
         self._f["fragment_length_counts"] = fragment_lengths
 
 
-def build_sub_fragments_h5(input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, tmp_dir_name):
+def build_sub_fragments_h5(args):
     """Collect, assemble, and compress all of the fragmnet data for a single contig.
 
     """
+    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, tmp_dir_name = args
+
     logger.info(f"Converting {contig})")
 
     if single_end:
@@ -755,7 +759,7 @@ def build_sub_fragments_h5(input_fname, contig, fasta_filename, single_end, read
 
     # if there are no fragments then there's nothing left to do
     if ff == 0:
-        return None
+        return None, None
 
     # write the data into the h5 file
     ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
@@ -783,7 +787,7 @@ def build_sub_fragments_h5(input_fname, contig, fasta_filename, single_end, read
 
     f.close()
 
-    return ofname
+    return contig, ofname
 
 
 def build_fragments_h5(
@@ -797,6 +801,7 @@ def build_fragments_h5(
     read_methyl=False,
     # treat the bam as single ended reads
     single_end=False,
+    num_processes=None,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -811,14 +816,7 @@ def build_fragments_h5(
         raise NotImplementedError("Methylation tag parsing is not currently implemented for single ended reads")
 
     if fasta_file is not None:
-        if isinstance(fasta_file, (str, bytes)):
-            fasta_file = pysam.FastaFile(fasta_file)
-        elif isinstance(fasta_file, pysam.FastaFile):
-            pass
-        else:
-            raise TypeError(
-                "'in_fasta_file' type must be a pysam.FastaFile, str, bytes, or None if GC calcs aren't needed."
-            )
+        fasta_file = fasta_file.filename
         read_gc = True
     else:
         read_gc = False
@@ -852,32 +850,33 @@ def build_fragments_h5(
     contig_lengths = eval(f.attrs["_contig_lengths_str"])
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
-
-    # from multiprocessing import Pool
     args = list(contig_lengths.keys())
 
-    sub_dfs = []
+    logger.info("Loading fragments for insertion into h5")
+    f.create_group('data')
     with tempfile.TemporaryDirectory() as tmp_dir:
-        print(tmp_dir)
-        logger.info("Loading fragments for insertion into h5")
+        args = []
+
         for contig in contig_lengths.keys():
             # skip contigs with zero mapped reads
             if num_mapped[contig] == 0:
                 continue
 
-            # starts_arr, lengths_arr, mapq_arr, gc_arr, strand_arr, methyl_arrays, ff =
-            sub_df_path = build_sub_fragments_h5(
-                input_fname, contig, fasta_file.filename, single_end,
-                read_gc, read_strand, read_methyl,
-                tmp_dir
-            )
-            if sub_df_path is not None:
-                sub_dfs.append((contig, h5py.File(sub_df_path, "r")))
+            args.append((
+                input_fname, contig, fasta_file, single_end,
+                read_gc, read_strand, read_methyl, tmp_dir
+            ))
+
+        with Pool(processes=num_processes) as pool:
+            contigs_and_paths = pool.map(build_sub_fragments_h5, args)
 
         # merge all of the fragment h5s
-        f.create_group('data')
-        for contig, sub_df in sub_dfs:
-            f.copy(sub_df['data'][contig], f['data'])
+        for contig, sub_h5_path in contigs_and_paths:
+            if contig is None: continue
+
+            sub_h5 = h5py.File(sub_h5_path, "r")
+            f.copy(sub_h5['data'][contig], f['data'])
+
 
     logger.info("Creating index")
     contig_lengths = eval(f.attrs["_contig_lengths_str"])

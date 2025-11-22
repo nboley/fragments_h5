@@ -26,6 +26,9 @@ def parse_args():
     parser.add_argument(
         "--single-end", default=False, action="store_true", help="Sequencing is single ended (useful for long read technologies)"
     )
+    parser.add_argument(
+        "--num-processes", default=1, help="Num of processes to use (defaults to 1 -- use 'all' for all cores)"
+    )
 
     return parser.parse_args()
 
@@ -40,6 +43,11 @@ def main():
             import subprocess
             subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
 
+    if args.num_processes.lower() == 'all':
+        num_processes = None
+    else:
+        num_processes = int(args.num_processes)
+
     build_fragments_h5(
         args.input_bam,
         args.output_frags_h5,
@@ -48,7 +56,8 @@ def main():
         set_mapq_255_to_none=args.set_mapq_255_to_none,
         read_strand=not args.exclude_strand,
         read_methyl=args.read_methyl,
-        single_end=args.single_end
+        single_end=args.single_end,
+        num_processes=num_processes,
     )
 
 
