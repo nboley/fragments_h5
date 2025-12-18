@@ -5,6 +5,7 @@ channels:
   - defaults
 dependencies:
   - python>=3.10
+  - setuptools>=61.0
   - numpy
   - h5py
   - pysam

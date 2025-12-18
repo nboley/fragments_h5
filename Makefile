@@ -49,6 +49,11 @@ docker:
 	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
 	@echo "Docker image built: $(IMAGE_NAME):$(VERSION)"
 
+docker-no-cache:
+	@echo "Building Docker image $(IMAGE_NAME):$(VERSION) (no cache)..."
+	docker build --no-cache -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+	@echo "Docker image built: $(IMAGE_NAME):$(VERSION)"
+
 push: docker
 	@echo "Tagging for GHCR..."
 	docker tag $(IMAGE_NAME):$(VERSION) $(GHCR_IMAGE):$(VERSION)
