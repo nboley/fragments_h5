@@ -69,7 +69,9 @@ RUN micromamba remove -y -n base c-compiler cython && \
     rm -rf /opt/conda/lib/libhdf5_hl_fortran* && \
     rm -rf /opt/conda/lib/cmake && \
     rm -rf /opt/conda/lib/pkgconfig && \
-    rm -rf /opt/conda/lib/krb5/plugins
+    rm -rf /opt/conda/lib/krb5/plugins && \
+    strip --strip-unneeded /opt/conda/lib/*.so* 2>/dev/null || true && \
+    strip --strip-unneeded /opt/conda/lib/python*/lib-dynload/*.so* 2>/dev/null || true
 
 # Runtime stage
 FROM mambaorg/micromamba:1.5-bookworm-slim
@@ -92,10 +94,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     rm -rf /var/lib/apt/lists/*
 
 # Create 'aws' shim that translates 'aws s3' commands to s5cmd
+# Handles: aws [--region X] [--profile Y] s3 <cmd> [--only-show-errors] ...
 RUN printf '%s\n' '#!/bin/bash' \
+    '# Parse global AWS options before s3 subcommand' \
+    'while [[ "$1" == --* ]] && [[ "$1" != "s3" ]]; do' \
+    '    case "$1" in' \
+    '        --region) export AWS_REGION="$2"; shift 2 ;;' \
+    '        --profile) export AWS_PROFILE="$2"; shift 2 ;;' \
+    '        *) shift ;;  # skip unknown global options' \
+    '    esac' \
+    'done' \
     'if [[ "$1" == "s3" ]]; then' \
     '    shift' \
-    '    exec /usr/local/bin/s5cmd "$@"' \
+    '    # Remove aws-cli-specific flags that s5cmd does not support' \
+    '    args=()' \
+    '    for arg in "$@"; do' \
+    '        [[ "$arg" != "--only-show-errors" ]] && args+=("$arg")' \
+    '    done' \
+    '    exec /usr/local/bin/s5cmd "${args[@]}"' \
     'fi' \
     'echo "Unsupported aws command: $*" >&2' \
     'exit 1' > /usr/local/bin/aws && chmod +x /usr/local/bin/aws
