@@ -42,7 +42,34 @@ RUN micromamba remove -y -n base c-compiler cython && \
     rm -rf /opt/conda/lib/python*/site-packages/_distutils_hack && \
     rm -rf /opt/conda/lib/python*/site-packages/distutils-precedence.pth && \
     rm -rf /opt/conda/bin/pip* && \
-    rm -rf /opt/conda/include
+    rm -rf /opt/conda/include && \
+    rm -rf /opt/conda/bin/*-ld && \
+    rm -rf /opt/conda/bin/nghttp* && \
+    rm -rf /opt/conda/bin/h5* && \
+    rm -rf /opt/conda/bin/bzip2* && \
+    rm -rf /opt/conda/bin/bunzip2 && \
+    rm -rf /opt/conda/bin/bzcat && \
+    rm -rf /opt/conda/bin/lz4* && \
+    rm -rf /opt/conda/bin/zstd* && \
+    rm -rf /opt/conda/man && \
+    rm -rf /opt/conda/sbin && \
+    rm -rf /opt/conda/conda-meta && \
+    rm -rf /opt/conda/lib/tcl* && \
+    rm -rf /opt/conda/lib/tk* && \
+    rm -rf /opt/conda/lib/libtcl* && \
+    rm -rf /opt/conda/lib/libtk* && \
+    rm -rf /opt/conda/lib/libsqlite* && \
+    rm -rf /opt/conda/lib/itcl* && \
+    rm -rf /opt/conda/lib/tdbc* && \
+    rm -rf /opt/conda/lib/thread* && \
+    rm -rf /opt/conda/lib/sqlite* && \
+    rm -rf /opt/conda/lib/libhdf5_cpp* && \
+    rm -rf /opt/conda/lib/libhdf5_fortran* && \
+    rm -rf /opt/conda/lib/libhdf5_hl_cpp* && \
+    rm -rf /opt/conda/lib/libhdf5_hl_fortran* && \
+    rm -rf /opt/conda/lib/cmake && \
+    rm -rf /opt/conda/lib/pkgconfig && \
+    rm -rf /opt/conda/lib/krb5/plugins
 
 # Runtime stage
 FROM mambaorg/micromamba:1.5-bookworm-slim
@@ -57,7 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends procps && \
 ARG S5CMD_VERSION=2.2.2
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "amd64") && \
+    ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "64bit") && \
     curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${ARCH}.tar.gz" | \
     tar xz -C /usr/local/bin s5cmd && \
     chmod +x /usr/local/bin/s5cmd && \
