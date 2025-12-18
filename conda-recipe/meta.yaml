@@ -1,0 +1,46 @@
+{% set name = "fragments-h5" %}
+{% set version = "2.2.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script: |
+    {{ PYTHON }} setup.py build_ext --inplace
+    {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+  entry_points:
+    - build-fragments-h5 = fragments_h5.main:main
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=61.0
+    - cython
+    - numpy
+  run:
+    - python >=3.10
+    - numpy
+    - h5py
+    - pysam
+
+test:
+  imports:
+    - fragments_h5
+  commands:
+    - build-fragments-h5 --help
+
+about:
+  home: https://github.com/nboley/fragments_h5
+  license: GPL-3.0-or-later
+  license_family: GPL
+  license_file: LICENSE
+  summary: Fast method for storing and querying DNA fragments
+

@@ -19,7 +19,7 @@ maintainers = [
 ]
 description = "Fast method for storing and querying DNA fragments"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = {text = "GPL-3.0-or-later"}
 keywords = ["fragmentomics"]
 classifiers = [
   "Development Status :: 4 - Beta",
