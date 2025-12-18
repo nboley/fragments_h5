@@ -11,4 +11,5 @@ dependencies:
   - pysam
   - cython
   - pip
+  - c-compiler
 
