@@ -111,6 +111,11 @@ RUN printf '%s\n' '#!/bin/bash' \
     '    for arg in "$@"; do' \
     '        [[ "$arg" != "--only-show-errors" ]] && args+=("$arg")' \
     '    done' \
+    '    # s5cmd uses "cat" for stdout output, not "cp source -"' \
+    '    if [[ "${args[0]}" == "cp" ]] && [[ "${args[-1]}" == "-" ]]; then' \
+    '        unset "args[-1]"  # remove trailing -' \
+    '        args[0]="cat"     # change cp to cat' \
+    '    fi' \
     '    exec /usr/local/bin/s5cmd "${args[@]}"' \
     'fi' \
     'echo "Unsupported aws command: $*" >&2' \
