@@ -16,8 +16,10 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 RUN python setup.py build_ext --inplace && \
     pip install --no-cache-dir --no-deps .
 
-# Aggressive cleanup to reduce image size
-RUN find /opt/conda -name "*.a" -delete && \
+# Remove build-time-only packages and aggressive cleanup to reduce image size
+RUN micromamba remove -y -n base c-compiler cython setuptools pip && \
+    micromamba clean --all --yes && \
+    find /opt/conda -name "*.a" -delete && \
     find /opt/conda -name "*.pyc" -delete && \
     find /opt/conda -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true && \
     find /opt/conda -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true && \
