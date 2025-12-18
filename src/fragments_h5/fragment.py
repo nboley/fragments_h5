@@ -1,6 +1,6 @@
 from collections import Counter
 
-import funcsigs
+import inspect
 import logging
 import numpy
 import re
@@ -10,7 +10,7 @@ import pysam
 
 from typing import Union, Optional
 
-from sequence import one_hot_encode_sequences
+from fragments_h5.sequence import one_hot_encode_sequences
 
 DEFAULT_MIN_MAPQ = 0
 
@@ -81,15 +81,15 @@ def intervals_intersect_with_none(x_start, x_stop, y_start, y_stop):
 
 def get_percent_gc_slow(seq):
     """
-    >>> get_percent_gc('ACTG')
+    >>> get_percent_gc_slow('ACTG')
     0.5
-    >>> get_percent_gc('AA')
+    >>> get_percent_gc_slow('AA')
     0.0
-    >>> get_percent_gc('GC')
+    >>> get_percent_gc_slow('GC')
     1.0
-    >>> get_percent_gc('N')
+    >>> get_percent_gc_slow('N')
     nan
-    >>> get_percent_gc('CH')
+    >>> get_percent_gc_slow('CH')
     Traceback (most recent call last):
     ...
     AssertionError: Counter({'H': 1}) contains unexpected characters...
@@ -232,7 +232,7 @@ class Fragment:
 
     @classproperty
     def field_types(cls):
-        sig = funcsigs.signature(cls.__init__)
+        sig = inspect.signature(cls.__init__)
         return [sig.parameters[field].annotation for field in cls.field_names]
 
     @property

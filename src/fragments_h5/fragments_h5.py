@@ -447,8 +447,10 @@ class FragmentsH5:
                 source_sel=numpy.s_[fragment_lower_bound_index:fragment_upper_bound_index],
             )
         else:
-            # if this contig isn't indexed for some reason then just read the index array
-            sub_array = self.data[contig]["starts"]
+            # if this contig isn't indexed for some reason then read the entire starts array
+            fragment_lower_bound_index = 0
+            fragment_upper_bound_index = len(self.data[contig]["starts"])
+            sub_array = self.data[contig]["starts"][:]
 
 
         start_index = numpy.searchsorted(sub_array, lower_bound_inclusive, side="left")
@@ -666,7 +668,7 @@ def build_sub_fragments_h5(args):
     """Collect, assemble, and compress all of the fragmnet data for a single contig.
 
     """
-    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, tmp_dir_name = args
+    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, tmp_dir_name = args
 
     if single_end:
         input_to_fragments = single_end_bam_to_fragments
@@ -766,7 +768,7 @@ def build_sub_fragments_h5(args):
     # create the h5 storing all of this data
     def mk_dataset(key, data, dtype):
         f.create_dataset(
-            key, data=data[: ff + 1], dtype=dtype,
+            key, data=data[:ff], dtype=dtype,
             compression="gzip", compression_opts=4, chunks=True
         )
 
@@ -861,7 +863,7 @@ def build_fragments_h5(
 
             args.append((
                 input_fname, contig, fasta_filename, single_end,
-                read_gc, read_strand, read_methyl, tmp_dir
+                read_gc, read_strand, read_methyl, set_mapq_255_to_none, tmp_dir
             ))
 
         with Pool(processes=num_processes) as pool:

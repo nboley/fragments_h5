@@ -6,7 +6,7 @@ Fragments h5 is a python library that implements a fast and memory efficient met
 
 First, convert your bam to a fragment h5 using the build-fragments-h5 command. 
 ```
-build-fragments-h5 test/data/small.chr6.bam ./small.chr6.fragments.h5 --sample-id test_data --reference hg38 
+build-fragments-h5 test/data/small.chr6.bam ./small.chr6.fragments.h5
 ```
 
 We can use h5ls to inspect the h5 file.
@@ -81,11 +81,8 @@ Args:
     fname (str)             : path to fragment h5 file.
     mode (str)              : mode to load the h5 file in. (defaults to 'r')
     cache_pointers (bool)   : Whether or not to load the index into memory. (defaults to False)
-        This is a memory-intensive operation but doubles the fetch speed. This is usually worth
-        it when you're analyzing a single fragment h5 and want to look across lots of regions,
-        but can quickly lead to memory issue.
-    use_s3_fs (bool)        : If set then allow `s3:// ... ` paths to be loaded. Requires s3fs to be installed.
-    s3_fs_read_timeout (int): Tiemout time for s3fs. (Defaults to 60)
+        NOTE: This feature is currently disabled (no-op) due to file size bloat issues.
+        TODO: Re-implement cache_pointers with a more memory-efficient approach.
 
 Returns:
     FragmentsH5 instance
@@ -139,15 +136,15 @@ usage: build-fragments-h5 [-h] [--quiet | --verbose | --debug]
                           [--log-format LOG_FORMAT]
                           [--log-filename LOG_FILENAME]
                           [--log-file-verbosity-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}]
-                          [--log-file-format LOG_FILE_FORMAT] --reference
-                          {hg16,hg17,hg18,hg19,hg38} --sample-id SAMPLE_ID
+                          [--log-file-format LOG_FILE_FORMAT]
                           [--fasta FASTA] [--contigs CONTIGS [CONTIGS ...]]
                           [--set-mapq-255-to-none] [--exclude-strand]
-                          [--read-methyl]
-                          input_bam_or_bed output_frags_h5
+                          [--read-methyl] [--single-end]
+                          [--num-processes NUM_PROCESSES]
+                          input_bam output_frags_h5
 
 positional arguments:
-  input_bam_or_bed      bam or bed file to read fragments from
+  input_bam             bam file to read fragments from
   output_frags_h5       where to write the new fragments h5
 
 optional arguments:
@@ -158,18 +155,18 @@ optional arguments:
                         output stream.
   --debug               Output debug level log messages (and above) to the
                         output stream.
-  --reference {hg16,hg17,hg18,hg19,hg38}
-                        The reference genome of input_bam (hg19 or hg38).
-  --sample-id SAMPLE_ID
-                        The sample_id of the bam (should correspond to an
-                        entry in SampleDataFrame.
   --fasta FASTA         Path to a fasta file containing the reference genome.
   --contigs CONTIGS [CONTIGS ...]
                         Restrict building the fragment h5 over these contigs.
   --set-mapq-255-to-none
                         set mapqs of 255 to None
   --exclude-strand      Exclude strand info
-  --read-methyl         Read in methylation frag beds
+  --read-methyl         Parse cpg's and converted cpg's from YM tag
+  --single-end          Sequencing is single ended (useful for long read
+                        technologies)
+  --num-processes NUM_PROCESSES
+                        Num of processes to use (defaults to 1 -- use 'all'
+                        for all cores)
 
 logging:
   --log-format LOG_FORMAT

@@ -33,7 +33,7 @@ def small_h5_path(bam_path, fasta_file_path):
     with tempfile.TemporaryDirectory() as dirname:
         ofname = os.path.join(dirname, os.path.basename(bam_path) + ".frag.h5")
         build_fragments_h5(
-            bam_path, ofname, fasta_file=fasta_file_path
+            bam_path, ofname, fasta_filename=fasta_file_path
         )
         yield ofname
 
@@ -151,3 +151,169 @@ def test_fetch_cache_v_no_cache(small_h5_path):
     ) == list(
         FragmentsH5(small_h5_path, "r", cache_pointers=False).fetch(*GREATEST_HITS[0])
     )
+
+
+def test_context_manager(small_h5_path):
+    """Test that FragmentsH5 works as a context manager."""
+    with FragmentsH5(small_h5_path) as fh5:
+        starts, stops, _ = fh5.fetch_array("chr6")
+        assert len(starts) > 0
+
+
+def test_properties(small_h5_path):
+    """Test various properties of FragmentsH5."""
+    fh5 = FragmentsH5(small_h5_path)
+    
+    # Test filename/name properties
+    assert fh5.filename == fh5.name
+    assert small_h5_path in fh5.filename
+    
+    # Test n_fragments
+    assert fh5.n_fragments > 0
+    assert fh5.n_frags == fh5.n_fragments
+    
+    # Test fragment_length_counts
+    assert len(fh5.fragment_length_counts) == fh5.max_fragment_length + 1
+    assert fh5.fragment_length_counts.sum() == fh5.n_fragments
+    
+    fh5.close()
+
+
+def test_fetch_empty_region(small_h5_path):
+    """Test fetching from a region with no fragments."""
+    fh5 = FragmentsH5(small_h5_path)
+    
+    # Query a region far from any data (beginning of chr6)
+    starts, stops, supp_data = fh5.fetch_array("chr6", 0, 100)
+    assert len(starts) == 0
+    assert len(stops) == 0
+    
+    fh5.close()
+
+
+def test_fetch_missing_contig(small_h5_path):
+    """Test fetching from a contig that doesn't exist raises KeyError."""
+    fh5 = FragmentsH5(small_h5_path)
+    
+    # Query a contig not in the data - should raise KeyError
+    with pytest.raises(KeyError):
+        fh5.fetch_array("chr_nonexistent", 0, 1000)
+    
+    fh5.close()
+
+
+def test_fetch_with_max_frag_len(target_h5_path):
+    """Test that max_frag_len filtering works."""
+    fh5 = FragmentsH5(target_h5_path)
+    
+    contig, start, stop = "chr6", 99118615, 99121634
+    
+    # Fetch all fragments
+    starts_all, stops_all, _ = fh5.fetch_array(contig, start, stop)
+    
+    # Fetch with max_frag_len=200
+    starts_filtered, stops_filtered, _ = fh5.fetch_array(
+        contig, start, stop, max_frag_len=200
+    )
+    
+    # Filtered should have fewer or equal fragments
+    assert len(starts_filtered) <= len(starts_all)
+    
+    # All filtered fragments should be <= 200 bp
+    lengths = stops_filtered - starts_filtered
+    assert all(lengths <= 200)
+    
+    fh5.close()
+
+
+def test_fetch_with_midpoint_filter(target_h5_path):
+    """Test filter_to_midpoint_frags option."""
+    fh5 = FragmentsH5(target_h5_path)
+    
+    contig, start, stop = "chr6", 99119615, 99119634
+    
+    # Fetch overlapping fragments
+    starts_overlap, stops_overlap, _ = fh5.fetch_array(
+        contig, start, stop, filter_to_midpoint_frags=False
+    )
+    
+    # Fetch midpoint-filtered fragments
+    starts_midpoint, stops_midpoint, _ = fh5.fetch_array(
+        contig, start, stop, filter_to_midpoint_frags=True
+    )
+    
+    # Midpoint-filtered should have fewer or equal fragments
+    assert len(starts_midpoint) <= len(starts_overlap)
+    
+    # All midpoint-filtered fragments should have midpoints in [start, stop)
+    midpoints = starts_midpoint + (stops_midpoint - starts_midpoint) // 2
+    assert all((midpoints >= start) & (midpoints < stop))
+    
+    fh5.close()
+
+
+def test_fetch_supplementary_data(target_h5_path):
+    """Test fetching with supplementary data options."""
+    fh5 = FragmentsH5(target_h5_path)
+    
+    contig, start, stop = "chr6", 99119615, 99119634
+    
+    # Test return_mapqs
+    starts, stops, supp = fh5.fetch_array(
+        contig, start, stop, return_mapqs=True
+    )
+    assert "mapq" in supp
+    assert supp["mapq"].shape == (len(starts), 2)
+    
+    # Test return_gc
+    starts, stops, supp = fh5.fetch_array(
+        contig, start, stop, return_gc=True
+    )
+    assert "gc" in supp
+    assert len(supp["gc"]) == len(starts)
+    
+    # Test return_strand
+    starts, stops, supp = fh5.fetch_array(
+        contig, start, stop, return_strand=True
+    )
+    assert "strand" in supp
+    assert len(supp["strand"]) == len(starts)
+    
+    fh5.close()
+
+
+def test_region_beyond_contig_raises(small_h5_path):
+    """Test that querying beyond contig end raises ValueError."""
+    fh5 = FragmentsH5(small_h5_path)
+    
+    # Get the contig length
+    contig_len = fh5.contig_lengths["chr6"]
+    
+    # Query starting beyond the contig should raise
+    with pytest.raises(ValueError, match="beyond the contig end"):
+        fh5.fetch_array("chr6", contig_len + 1000, contig_len + 2000)
+    
+    fh5.close()
+
+
+def test_pickle_support(small_h5_path):
+    """Test that FragmentsH5 can be pickled (for multiprocessing)."""
+    import pickle
+    
+    fh5 = FragmentsH5(small_h5_path)
+    
+    # Get some data before pickling
+    starts_before, stops_before, _ = fh5.fetch_array("chr6")
+    
+    # Pickle and unpickle
+    pickled = pickle.dumps(fh5)
+    fh5_restored = pickle.loads(pickled)
+    
+    # Verify data is the same after unpickling
+    starts_after, stops_after, _ = fh5_restored.fetch_array("chr6")
+    
+    assert list(starts_before) == list(starts_after)
+    assert list(stops_before) == list(stops_after)
+    
+    fh5.close()
+    fh5_restored.close()

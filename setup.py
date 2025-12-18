@@ -4,7 +4,7 @@ from setuptools import setup, Extension
 
 extensions = cythonize(
     [
-        Extension("sequence", ["src/fragments_h5/sequence.pyx"]),
+        Extension("fragments_h5.sequence", ["src/fragments_h5/sequence.pyx"]),
     ],
     compiler_directives={"language_level": "3"},
 )
