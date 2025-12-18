@@ -16,8 +16,9 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 RUN python setup.py build_ext --inplace && \
     pip install --no-cache-dir --no-deps .
 
-# Remove build-time-only packages and aggressive cleanup to reduce image size
-RUN micromamba remove -y -n base c-compiler cython setuptools pip && \
+# Remove build-time-only packages and cleanup to reduce image size
+# Note: removing pip/setuptools via micromamba cascades to remove python, so we remove manually
+RUN micromamba remove -y -n base c-compiler cython && \
     micromamba clean --all --yes && \
     find /opt/conda -name "*.a" -delete && \
     find /opt/conda -name "*.pyc" -delete && \
@@ -25,18 +26,32 @@ RUN micromamba remove -y -n base c-compiler cython setuptools pip && \
     find /opt/conda -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true && \
     find /opt/conda -name "test" -type d -exec rm -rf {} + 2>/dev/null || true && \
     find /opt/conda -name "*.pyx" -delete && \
-    find /opt/conda -name "*.c" -delete && \
-    find /opt/conda -name "*.h" ! -path "*/numpy/*" -delete 2>/dev/null || true && \
     rm -rf /opt/conda/pkgs/* && \
     rm -rf /opt/conda/share/man && \
     rm -rf /opt/conda/share/doc && \
     rm -rf /opt/conda/share/gtk-doc && \
-    rm -rf /opt/conda/include && \
-    rm -rf /opt/conda/conda-meta/*.json && \
-    strip --strip-unneeded /opt/conda/lib/*.so* 2>/dev/null || true
+    rm -rf /opt/conda/share/terminfo && \
+    rm -rf /opt/conda/share/locale && \
+    rm -rf /opt/conda/lib/python*/ensurepip && \
+    rm -rf /opt/conda/lib/python*/idlelib && \
+    rm -rf /opt/conda/lib/python*/tkinter && \
+    rm -rf /opt/conda/lib/python*/lib2to3 && \
+    rm -rf /opt/conda/lib/python*/site-packages/pip* && \
+    rm -rf /opt/conda/lib/python*/site-packages/setuptools* && \
+    rm -rf /opt/conda/lib/python*/site-packages/pkg_resources && \
+    rm -rf /opt/conda/lib/python*/site-packages/_distutils_hack && \
+    rm -rf /opt/conda/lib/python*/site-packages/distutils-precedence.pth && \
+    rm -rf /opt/conda/bin/pip* && \
+    rm -rf /opt/conda/include
 
 # Runtime stage
 FROM mambaorg/micromamba:1.5-bookworm-slim
+
+USER root
+
+# Copy AWS CLI v2 from official Amazon image (much smaller than conda awscli)
+COPY --from=amazon/aws-cli:latest /usr/local/aws-cli /usr/local/aws-cli
+RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 
 # Copy only the cleaned conda environment
 COPY --from=builder /opt/conda /opt/conda
