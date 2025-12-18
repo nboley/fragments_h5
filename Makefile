@@ -17,7 +17,7 @@ VERSION ?= $(shell grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)
 IMAGE_NAME = fragments-h5
 GHCR_IMAGE = ghcr.io/$(GITHUB_USER)/$(IMAGE_NAME)
 
-.PHONY: all conda docker push clean help
+.PHONY: all conda docker push tag clean help
 
 help:
 	@echo "Usage: make [target]"
@@ -26,6 +26,7 @@ help:
 	@echo "  conda    Build conda package"
 	@echo "  docker   Build Docker image"
 	@echo "  push     Tag and push Docker image to GHCR"
+	@echo "  tag      Create and push git tag v\$$VERSION"
 	@echo "  all      Build everything and push"
 	@echo "  clean    Remove build artifacts"
 	@echo ""
@@ -60,6 +61,13 @@ push: docker
 	docker push $(GHCR_IMAGE):$(VERSION)
 	docker push $(GHCR_IMAGE):latest
 	@echo "Pushed: $(GHCR_IMAGE):$(VERSION)"
+
+tag:
+	@echo "Creating git tag v$(VERSION)..."
+	git tag -a v$(VERSION) -m "Release v$(VERSION)"
+	@echo "Pushing tag to origin..."
+	git push origin v$(VERSION)
+	@echo "Tagged: v$(VERSION)"
 
 clean:
 	rm -rf conda-build-output/
