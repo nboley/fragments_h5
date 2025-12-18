@@ -42,5 +42,5 @@ COPY --from=builder /opt/conda /opt/conda
 WORKDIR /data
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
 
-ENTRYPOINT ["/usr/local/bin/_entrypoint.sh", "build-fragments-h5"]
-CMD ["--help"]
+ENTRYPOINT ["/usr/local/bin/_entrypoint.sh"]
+CMD ["build-fragments-h5", "--help"]
