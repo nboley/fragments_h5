@@ -49,12 +49,10 @@ docker:
 	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
 	@echo "Docker image built: $(IMAGE_NAME):$(VERSION)"
 
-docker-no-cache:
-	@echo "Building Docker image $(IMAGE_NAME):$(VERSION) (no cache)..."
-	docker build --no-cache -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
-	@echo "Docker image built: $(IMAGE_NAME):$(VERSION)"
-
 push: docker
+	@echo "Authenticating with GHCR..."
+	@docker logout ghcr.io 2>/dev/null || true
+	@gh auth token | docker login ghcr.io -u $(GITHUB_USER) --password-stdin
 	@echo "Tagging for GHCR..."
 	docker tag $(IMAGE_NAME):$(VERSION) $(GHCR_IMAGE):$(VERSION)
 	docker tag $(IMAGE_NAME):latest $(GHCR_IMAGE):latest
