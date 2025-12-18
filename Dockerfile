@@ -16,8 +16,7 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 RUN python setup.py build_ext --inplace && \
     pip install --no-cache-dir --no-deps .
 
-# Remove build-time-only packages and cleanup to reduce image size
-# Note: removing pip/setuptools via micromamba cascades to remove python, so we remove manually
+# Remove build-time-only packages (but not pip which would remove python)
 RUN micromamba remove -y -n base c-compiler cython && \
     micromamba clean --all --yes && \
     find /opt/conda -name "*.a" -delete && \
@@ -29,49 +28,7 @@ RUN micromamba remove -y -n base c-compiler cython && \
     rm -rf /opt/conda/pkgs/* && \
     rm -rf /opt/conda/share/man && \
     rm -rf /opt/conda/share/doc && \
-    rm -rf /opt/conda/share/gtk-doc && \
-    rm -rf /opt/conda/share/terminfo && \
-    rm -rf /opt/conda/share/locale && \
-    rm -rf /opt/conda/lib/python*/ensurepip && \
-    rm -rf /opt/conda/lib/python*/idlelib && \
-    rm -rf /opt/conda/lib/python*/tkinter && \
-    rm -rf /opt/conda/lib/python*/lib2to3 && \
-    rm -rf /opt/conda/lib/python*/site-packages/pip* && \
-    rm -rf /opt/conda/lib/python*/site-packages/setuptools* && \
-    rm -rf /opt/conda/lib/python*/site-packages/pkg_resources && \
-    rm -rf /opt/conda/lib/python*/site-packages/_distutils_hack && \
-    rm -rf /opt/conda/lib/python*/site-packages/distutils-precedence.pth && \
-    rm -rf /opt/conda/bin/pip* && \
-    rm -rf /opt/conda/include && \
-    rm -rf /opt/conda/bin/*-ld && \
-    rm -rf /opt/conda/bin/nghttp* && \
-    rm -rf /opt/conda/bin/h5* && \
-    rm -rf /opt/conda/bin/bzip2* && \
-    rm -rf /opt/conda/bin/bunzip2 && \
-    rm -rf /opt/conda/bin/bzcat && \
-    rm -rf /opt/conda/bin/lz4* && \
-    rm -rf /opt/conda/bin/zstd* && \
-    rm -rf /opt/conda/man && \
-    rm -rf /opt/conda/sbin && \
-    rm -rf /opt/conda/conda-meta && \
-    rm -rf /opt/conda/lib/tcl* && \
-    rm -rf /opt/conda/lib/tk* && \
-    rm -rf /opt/conda/lib/libtcl* && \
-    rm -rf /opt/conda/lib/libtk* && \
-    rm -rf /opt/conda/lib/libsqlite* && \
-    rm -rf /opt/conda/lib/itcl* && \
-    rm -rf /opt/conda/lib/tdbc* && \
-    rm -rf /opt/conda/lib/thread* && \
-    rm -rf /opt/conda/lib/sqlite* && \
-    rm -rf /opt/conda/lib/libhdf5_cpp* && \
-    rm -rf /opt/conda/lib/libhdf5_fortran* && \
-    rm -rf /opt/conda/lib/libhdf5_hl_cpp* && \
-    rm -rf /opt/conda/lib/libhdf5_hl_fortran* && \
-    rm -rf /opt/conda/lib/cmake && \
-    rm -rf /opt/conda/lib/pkgconfig && \
-    rm -rf /opt/conda/lib/krb5/plugins && \
-    strip --strip-unneeded /opt/conda/lib/*.so* 2>/dev/null || true && \
-    strip --strip-unneeded /opt/conda/lib/python*/lib-dynload/*.so* 2>/dev/null || true
+    rm -rf /opt/conda/share/gtk-doc
 
 # Runtime stage
 FROM mambaorg/micromamba:1.5-bookworm-slim
@@ -82,44 +39,9 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends procps && \
     rm -rf /var/lib/apt/lists/*
 
-# Install s5cmd (fast S3 client, ~20MB vs ~250MB for aws-cli)
-ARG S5CMD_VERSION=2.2.2
-ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "64bit") && \
-    curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-${ARCH}.tar.gz" | \
-    tar xz -C /usr/local/bin s5cmd && \
-    chmod +x /usr/local/bin/s5cmd && \
-    apt-get remove -y curl && apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
-
-# Create 'aws' shim that translates 'aws s3' commands to s5cmd
-# Handles: aws [--region X] [--profile Y] s3 <cmd> [--only-show-errors] ...
-RUN printf '%s\n' '#!/bin/bash' \
-    '# Parse global AWS options before s3 subcommand' \
-    'while [[ "$1" == --* ]] && [[ "$1" != "s3" ]]; do' \
-    '    case "$1" in' \
-    '        --region) export AWS_REGION="$2"; shift 2 ;;' \
-    '        --profile) export AWS_PROFILE="$2"; shift 2 ;;' \
-    '        *) shift ;;  # skip unknown global options' \
-    '    esac' \
-    'done' \
-    'if [[ "$1" == "s3" ]]; then' \
-    '    shift' \
-    '    # Remove aws-cli-specific flags that s5cmd does not support' \
-    '    args=()' \
-    '    for arg in "$@"; do' \
-    '        [[ "$arg" != "--only-show-errors" ]] && args+=("$arg")' \
-    '    done' \
-    '    # s5cmd uses "cat" for stdout output, not "cp source -"' \
-    '    if [[ "${args[0]}" == "cp" ]] && [[ "${args[-1]}" == "-" ]]; then' \
-    '        unset "args[-1]"  # remove trailing -' \
-    '        args[0]="cat"     # change cp to cat' \
-    '    fi' \
-    '    exec /usr/local/bin/s5cmd "${args[@]}"' \
-    'fi' \
-    'echo "Unsupported aws command: $*" >&2' \
-    'exit 1' > /usr/local/bin/aws && chmod +x /usr/local/bin/aws
+# Copy AWS CLI v2 from official Amazon image
+COPY --from=amazon/aws-cli:latest /usr/local/aws-cli /usr/local/aws-cli
+RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 
 # Copy only the cleaned conda environment
 COPY --from=builder /opt/conda /opt/conda
