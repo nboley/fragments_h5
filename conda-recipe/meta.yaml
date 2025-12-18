@@ -1,5 +1,5 @@
 {% set name = "fragments-h5" %}
-{% set version = "2.2.2" %}
+{% set version = "2.2.3" %}
 
 package:
   name: {{ name|lower }}

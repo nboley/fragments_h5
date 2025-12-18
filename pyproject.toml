@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
   "numpy",
   "h5py",
