@@ -10,7 +10,7 @@ dependencies = [
   "h5py",
   "pysam",
 ]
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 authors = [
   {name = "Nathan Boley", email = "npboley@gmail.com"},
 ]
