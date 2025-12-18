@@ -139,8 +139,8 @@ Capture: Execution time: 5.176678895950317
 """
 import os
 import tempfile
-
-from multiprocessing import Pool
+import multiprocessing
+import signal
 
 import h5py
 import numpy
@@ -790,6 +790,19 @@ def build_sub_fragments_h5(args):
     return contig, ofname
 
 
+def _pool_worker_init():
+    """Initialize worker processes to ignore SIGINT and SIGTERM.
+    
+    This allows the main process to handle Ctrl+C (SIGINT) and termination
+    requests (SIGTERM, used by Nextflow for soft timeouts) gracefully,
+    rather than having workers raise exceptions independently.
+    
+    Note: SIGKILL cannot be caught - it forcefully terminates the process.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
 def build_fragments_h5(
     input_fname,
     ofname,
@@ -810,6 +823,16 @@ def build_fragments_h5(
     By the SAM spec mapq 255 is to be reserved for unknown MAPQs, but not all of
     aligners follow this so we raise an error by default when we encounter a MAPQ of
     255. This setting overrides that.
+    
+    Note on multiprocessing:
+        This function uses multiprocessing.Pool to parallelize fragment extraction.
+        To avoid fork-safety issues with HDF5 and pysam, the output HDF5 file is 
+        opened AFTER all worker processes complete. Each worker writes to a separate
+        temp file, which is then merged into the final output.
+        
+        When running inside Nextflow or other workflow managers, consider setting
+        num_processes=1 to avoid resource conflicts, or ensure the CPU allocation
+        matches the num_processes setting.
     """
 
     if single_end and read_methyl:
@@ -820,15 +843,6 @@ def build_fragments_h5(
     else:
         read_gc = False
 
-    f = h5py.File(ofname, "x")
-
-    # create a data group to store the fragments
-    f.create_group('data')
-
-    # Add the attributes
-    f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
-    f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
-
     # save metadata about the bam into the h5.
     # In particular, find the contigs and lengths, and save them into the h5.
     # h5s dont support dictionaries natively, so
@@ -837,22 +851,26 @@ def build_fragments_h5(
 
     logger.info("Extracting contig lengths from bam")
     with pysam.AlignmentFile(input_fname) as bam_fp:
-        f.attrs["_bam_header"] = str(bam_fp.header)
+        bam_header_str = str(bam_fp.header)
         if allowed_contigs is None:
             allowed_contigs = bam_fp.references
-        f.attrs["_contig_lengths_str"] = str(dict(zip(allowed_contigs, bam_fp.lengths)))
+        contig_lengths_str = str(dict(zip(allowed_contigs, bam_fp.lengths)))
         num_mapped = {
             x.contig: x.mapped // 2
             for x in bam_fp.get_index_statistics()
             if allowed_contigs is None or x.contig in allowed_contigs
         }
-        num_mapped_cnt = sum(num_mapped.values())
-    input_type = "bam"
 
-    contig_lengths = eval(f.attrs["_contig_lengths_str"])
+    contig_lengths = eval(contig_lengths_str)
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
     logger.info("Loading fragments for insertion into h5")
+    
+    # Collect results from workers BEFORE opening the output HDF5 file.
+    # This avoids fork-safety issues with HDF5 (forking with open HDF5 files
+    # can cause deadlocks or data corruption).
+    completed_results = []
+    
     with tempfile.TemporaryDirectory() as tmp_dir:
         args = []
 
@@ -866,42 +884,84 @@ def build_fragments_h5(
                 read_gc, read_strand, read_methyl, set_mapq_255_to_none, tmp_dir
             ))
 
-        with Pool(processes=num_processes) as pool:
-            contigs_and_paths = pool.imap_unordered(build_sub_fragments_h5, args)
+        # Use 'forkserver' for a good balance of safety and performance.
+        # - 'fork': Fast but unsafe (inherits parent's locks, threads, file handles)
+        # - 'spawn': Safe but slow (starts fresh Python interpreter for each worker)
+        # - 'forkserver': Safe AND fast (forks from a clean server process)
+        ctx = multiprocessing.get_context('forkserver')
+        
+        try:
+            with ctx.Pool(
+                processes=num_processes,
+                initializer=_pool_worker_init,
+            ) as pool:
+                # Use imap_unordered for memory efficiency, but collect results
+                # to allow proper error handling before opening output file
+                results_iter = pool.imap_unordered(build_sub_fragments_h5, args)
+                
+                for i, result in enumerate(results_iter):
+                    contig, sub_h5_path = result
+                    if contig is not None:
+                        completed_results.append((contig, sub_h5_path))
+                    logger.info(f"Finished extracting fragments from contig ({i+1}/{len(args)})")
+                    
+        except KeyboardInterrupt:
+            logger.warning("Received interrupt signal, terminating workers...")
+            raise
+        
+        # Check that we actually found some fragments
+        if len(completed_results) == 0:
+            raise ValueError(
+                f"No fragments were extracted from '{input_fname}'. "
+                f"This may indicate: (1) the BAM file is empty, (2) all reads were filtered out, "
+                f"(3) contig names don't match between --contigs and the BAM header, or "
+                f"(4) the BAM contains only unpaired/unmapped reads. "
+                f"Contigs in BAM: {list(contig_lengths.keys())[:5]}{'...' if len(contig_lengths) > 5 else ''}"
+            )
+        
+        # Now that all workers are done, open the output HDF5 file and merge results
+        logger.info("Merging fragment data into output file")
+        f = h5py.File(ofname, "x")
+        
+        try:
+            # create a data group to store the fragments
+            f.create_group('data')
+
+            # Add the attributes
+            f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
+            f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
+            f.attrs["_bam_header"] = bam_header_str
+            f.attrs["_contig_lengths_str"] = contig_lengths_str
 
             # merge all of the fragment h5s
-            for i, (contig, sub_h5_path) in enumerate(contigs_and_paths):
-                # skip contigs with no reads
-                if contig is None: continue
-                # copy the subprocess data into the main h5
+            for contig, sub_h5_path in completed_results:
                 with h5py.File(sub_h5_path, "r") as sub_h5:
                     f.copy(sub_h5['data'][contig], f['data'])
-                logger.info(f"Finished Processing {contig} ({i+1}/{len(args)})'")
+                logger.debug(f"Merged {contig}")
 
+            logger.info("Creating index")
+            # Build the index
+            # See the class notes for a description of the index
+            for contig in f["data"]:
+                # skip contigs that are shorter than the index block length
+                # the indexing doesn't do anything if we're always still reading the full contig
+                if contig_lengths[contig] <= INDEX_BLOCK_SIZE:
+                    continue
+                # skip contigs with too few reads.
+                if len(f[f"data/{contig}/starts"]) < MIN_NUM_READS_FOR_INDEX:
+                    continue
 
-    logger.info("Creating index")
-    contig_lengths = eval(f.attrs["_contig_lengths_str"])
-    # Build the index
-    # See the class notes for a description of the index
-    for contig in f["data"]:
-        # skip contigs that are shorter than the index block length
-        # the indexing doesn't do anything if we're always still reading the full contig
-        if contig_lengths[contig] <= INDEX_BLOCK_SIZE:
-            continue
-        # skip contigs with too few reads.
-        if len(f[f"data/{contig}/starts"]) < MIN_NUM_READS_FOR_INDEX:
-            continue
-
-        block_indices = numpy.array(list(range(0, contig_lengths[contig], INDEX_BLOCK_SIZE)))
-        index_poss = numpy.searchsorted(
-            f[f"data/{contig}/starts"][:], block_indices, side="left"
-        )
-        # add a final entry so that the index lookup still works even if we're at the end of the contig.
-        # (e.g. index_ub = INDEX[1 + search_pos//10000] could be out of bounds)
-        index_poss = numpy.append(index_poss, len(f[f"data/{contig}/starts"]))
-        f[f"index/{contig}"] = index_poss
-
-    f.close()
+                block_indices = numpy.array(list(range(0, contig_lengths[contig], INDEX_BLOCK_SIZE)))
+                index_poss = numpy.searchsorted(
+                    f[f"data/{contig}/starts"][:], block_indices, side="left"
+                )
+                # add a final entry so that the index lookup still works even if we're at the end of the contig.
+                # (e.g. index_ub = INDEX[1 + search_pos//10000] could be out of bounds)
+                index_poss = numpy.append(index_poss, len(f[f"data/{contig}/starts"]))
+                f[f"index/{contig}"] = index_poss
+                
+        finally:
+            f.close()
 
     # open an h5 using the class interface in r/w mode so that we can
     # add the fragment length information
