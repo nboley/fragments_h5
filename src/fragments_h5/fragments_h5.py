@@ -924,8 +924,9 @@ def build_fragments_h5(
         f = h5py.File(ofname, "x")
         
         try:
-            # create a data group to store the fragments
+            # create groups to store the fragments and index
             f.create_group('data')
+            f.create_group('index')
 
             # Add the attributes
             f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
