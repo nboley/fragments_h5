@@ -668,7 +668,7 @@ def build_sub_fragments_h5(args):
     """Collect, assemble, and compress all of the fragmnet data for a single contig.
 
     """
-    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, tmp_dir_name = args
+    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, tmp_dir_name = args
 
     if single_end:
         input_to_fragments = single_end_bam_to_fragments
@@ -692,7 +692,7 @@ def build_sub_fragments_h5(args):
     # if there aren't any fragments then ff is never set. This fixes that edge case.
     ff = 0
     for fragment in input_to_fragments(
-        input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file
+        input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates
     ):
         # if we have filled this chunk then resize the array
         if ff % CHUNK_SIZE == 0:
@@ -815,6 +815,7 @@ def build_fragments_h5(
     # treat the bam as single ended reads
     single_end=False,
     num_processes=None,
+    include_duplicates=False,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -881,7 +882,7 @@ def build_fragments_h5(
 
             args.append((
                 input_fname, contig, fasta_filename, single_end,
-                read_gc, read_strand, read_methyl, set_mapq_255_to_none, tmp_dir
+                read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, tmp_dir
             ))
 
         # Use 'forkserver' for a good balance of safety and performance.

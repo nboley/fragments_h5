@@ -2,6 +2,7 @@ import os
 import pytest
 import subprocess
 import tempfile
+import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5, bam_to_fragments
 
@@ -26,6 +27,11 @@ def target_bam_path():
 @pytest.fixture(scope="module")
 def fasta_file_path():
     return os.path.join(DATA_DIR, "./GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
+
+
+@pytest.fixture(scope="module")
+def duplicates_bam_path():
+    return os.path.join(DATA_DIR, "./test_duplicates.bam")
 
 
 @pytest.fixture(scope="module")
@@ -317,3 +323,39 @@ def test_pickle_support(small_h5_path):
     
     fh5.close()
     fh5_restored.close()
+
+
+def test_include_duplicates(duplicates_bam_path, fasta_file_path):
+    """Test that include_duplicates parameter correctly includes/excludes duplicate-marked fragments.
+    
+    TODO: Investigate why this test hangs when num_processes > 1. The multiprocessing
+    may be causing deadlocks or issues with the small test BAM file. Currently using
+    num_processes=1 as a workaround.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Build h5 excluding duplicates (default)
+        h5_no_dups = os.path.join(tmpdir, "no_dups.h5")
+        build_fragments_h5(
+            duplicates_bam_path, h5_no_dups, fasta_filename=fasta_file_path,
+            include_duplicates=False, num_processes=1
+        )
+        
+        # Build h5 including duplicates
+        h5_with_dups = os.path.join(tmpdir, "with_dups.h5")
+        build_fragments_h5(
+            duplicates_bam_path, h5_with_dups, fasta_filename=fasta_file_path,
+            include_duplicates=True, num_processes=1
+        )
+        
+        # Compare fragment counts
+        fh5_no_dups = FragmentsH5(h5_no_dups)
+        fh5_with_dups = FragmentsH5(h5_with_dups)
+        
+        # Without duplicates: should have 1 fragment (the non-duplicate)
+        assert fh5_no_dups.n_fragments == 1
+        
+        # With duplicates: should have 2 fragments (both the original and duplicate)
+        assert fh5_with_dups.n_fragments == 2
+        
+        fh5_no_dups.close()
+        fh5_with_dups.close()

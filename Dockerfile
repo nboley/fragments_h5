@@ -36,12 +36,18 @@ FROM mambaorg/micromamba:1.5-bookworm-slim
 USER root
 
 # Install procps (provides 'ps' command needed by Nextflow for metrics)
-RUN apt-get update && apt-get install -y --no-install-recommends procps && \
+# Install s5cmd for high-performance S3 staging with Nextflow
+# Install aws-cli v2 (required by Nextflow for bin folder sync)
+ARG S5CMD_VERSION=2.3.0
+RUN apt-get update && apt-get install -y --no-install-recommends procps curl unzip && \
+    curl -sL https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-64bit.tar.gz | tar xz -C /usr/local/bin/ && \
+    chmod +x /usr/local/bin/s5cmd && \
+    curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip" && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/awscliv2.zip /tmp/aws && \
+    apt-get remove -y curl unzip && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
-
-# Copy AWS CLI v2 from official Amazon image
-COPY --from=amazon/aws-cli:latest /usr/local/aws-cli /usr/local/aws-cli
-RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 
 # Copy only the cleaned conda environment
 COPY --from=builder /opt/conda /opt/conda

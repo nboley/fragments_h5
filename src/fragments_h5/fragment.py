@@ -305,6 +305,7 @@ def bam_to_align(
     max_tlen=1000,
     include_neg_tlen=False,
     min_mapq=DEFAULT_MIN_MAPQ,
+    include_duplicates=False,
 ):
     """
     Simplified version of bam_to_fragments which relies on tlen being set properly by the aligner.
@@ -369,7 +370,7 @@ def bam_to_align(
             or abs(align_.tlen) > max_tlen
             or align_.is_qcfail
             or align_.is_supplementary
-            or align_.is_duplicate
+            or (not include_duplicates and align_.is_duplicate)
             or align_.is_unmapped
             or align_.mate_is_unmapped
         )
@@ -444,6 +445,7 @@ def bam_to_fragments(
     fasta_file: pysam.FastaFile = None,
     max_tlen=1000,
     min_mapq=DEFAULT_MIN_MAPQ,
+    include_duplicates=False,
 ):
     if isinstance(alignment_file, str):
         alignment_file = pysam.AlignmentFile(alignment_file)
@@ -461,6 +463,7 @@ def bam_to_fragments(
         fasta_file=fasta_file,
         max_tlen=max_tlen,
         min_mapq=min_mapq,
+        include_duplicates=include_duplicates,
     )
     for align in align_iter:
         frag_start, frag_stop = alignment_to_fragment_start_stop(align)
@@ -529,6 +532,7 @@ def single_end_bam_to_fragments(
         fasta_file: pysam.FastaFile = None,
         max_tlen=1000,
         min_mapq=DEFAULT_MIN_MAPQ,
+        include_duplicates=False,
     ):
     assert fasta_file is None
 
@@ -543,7 +547,7 @@ def single_end_bam_to_fragments(
         if (
             align.is_qcfail
             or align.is_supplementary
-            or align.is_duplicate
+            or (not include_duplicates and align.is_duplicate)
             or align.is_unmapped
             or align.mapq < min_mapq
         ): continue

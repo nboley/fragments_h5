@@ -27,6 +27,9 @@ def parse_args():
         "--single-end", default=False, action="store_true", help="Sequencing is single ended (useful for long read technologies)"
     )
     parser.add_argument(
+        "--include-duplicates", default=False, action="store_true", help="Include duplicate-marked fragments in the output (default: exclude duplicates)"
+    )
+    parser.add_argument(
         "--num-processes", default='1', help="Num of processes to use (defaults to 1 -- use 'all' for all cores)"
     )
 
@@ -58,6 +61,7 @@ def main():
         read_methyl=args.read_methyl,
         single_end=args.single_end,
         num_processes=num_processes,
+        include_duplicates=args.include_duplicates,
     )
 
 
