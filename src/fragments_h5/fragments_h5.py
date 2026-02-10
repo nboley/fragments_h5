@@ -141,6 +141,7 @@ import os
 import tempfile
 import multiprocessing
 import signal
+from contextlib import contextmanager
 
 import h5py
 import numpy
@@ -153,6 +154,9 @@ from fragments_h5.fragment import bam_to_fragments, single_end_bam_to_fragments,
 
 logger = logging.getLogger(__name__)
 
+# TODO: Address naming inconsistency - methyl_keys uses 'num_cpgs', 'num_converted_cpgs' 
+# while MethylCounts dataclass uses 'unconverted_cpgs', 'converted_cpgs'. 
+# This inconsistency could lead to confusion and bugs.
 methyl_keys = ['num_cpgs', 'num_converted_cpgs', 'num_cytosines', 'num_converted_cytosines']
 
 MIN_NUM_READS_FOR_INDEX = 100
@@ -235,6 +239,8 @@ class FragmentsH5:
         return self.name
 
     def cache_pointers(self):
+        # TODO: Implement cache_pointers with a more memory-efficient approach
+        # or remove if no longer needed. Currently a no-op.
         return
         # load the index into memory
         self.index = {}
@@ -327,6 +333,13 @@ class FragmentsH5:
             for contig in self.data.keys()
         )
 
+    @property
+    def has_fragment_end_clipped(self):
+        return any(
+            "fragment_end_clipped" in self.data[contig]
+            for contig in self.data.keys()
+        )
+
     def fetch_array(
         self,
         contig,
@@ -337,6 +350,7 @@ class FragmentsH5:
         return_gc=False,
         return_strand=False,
         return_methyl=None,
+        return_fragment_end_clipped=None,
         filter_to_midpoint_frags=False,
     ):
         """Fetch all fragments that overlap contig:[region_start, region_stop)
@@ -350,6 +364,7 @@ class FragmentsH5:
             return_gc (bool, optional): return fragments' gc content (defaults to False)
             return_strand (bool, optional): return fragments' strand (defaults to False)
             return_methyl (bool, optional): return fragments' cpg and converted cpg counts (defaults to False)
+            return_fragment_end_clipped (bool, optional): return fragment_end_clipped flag, 0=False 1=True 255=unknown (defaults to False)
             filter_to_midpoint_frags (bool, optional): only return fragments whose midpoints are contained in
                                                        the filter region (defaults to returning all overlapping
                                                        fragments)
@@ -374,6 +389,9 @@ class FragmentsH5:
                 (only set if return_methyl is set to True)
                 num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
                 num_meth_cpgs -> numpy.uint8 array containing number of unconverted cpgs in the fragmnet
+
+                (only set if return_fragment_end_clipped is set to True)
+                fragment_end_clipped -> numpy.uint8 array, 0=False 1=True 255=unknown
             }
 
         See the class docstring for details about the datastructure and search algorithm.
@@ -386,6 +404,9 @@ class FragmentsH5:
 
         if return_methyl is None:
             return_methyl = self.has_methyl
+
+        if return_fragment_end_clipped is None:
+            return_fragment_end_clipped = self.has_fragment_end_clipped
 
         if region_start >= self.contig_lengths[contig]:
             raise ValueError("Can not query for a region that begins beyond the contig end.")
@@ -405,6 +426,8 @@ class FragmentsH5:
                 rv[2]["num_converted_cpgs"] = numpy.empty(0, "uint8")
                 rv[2]["num_cytosines"] = numpy.empty(0, "uint8")
                 rv[2]["num_converted_cytosines"] = numpy.empty(0, "uint8")
+            if return_fragment_end_clipped:
+                rv[2]["fragment_end_clipped"] = numpy.empty(0, "uint8")
             return rv
 
         if max_frag_len is None:
@@ -543,6 +566,17 @@ class FragmentsH5:
                 )
                 supp_data[key] = supp_data[key][mask]
 
+        if return_fragment_end_clipped:
+            if "fragment_end_clipped" not in self.data[contig]:
+                raise ValueError(
+                    "The referenced h5 file does not contain fragment_end_clipped info."
+                )
+            supp_data["fragment_end_clipped"] = numpy.empty(slice_len, dtype="uint8")
+            self.data[contig]["fragment_end_clipped"].read_direct(
+                supp_data["fragment_end_clipped"], source_sel=indices_slice
+            )
+            supp_data["fragment_end_clipped"] = supp_data["fragment_end_clipped"][mask]
+
         return starts, stops, supp_data
 
     def fetch(
@@ -555,6 +589,7 @@ class FragmentsH5:
         return_gc=False,
         return_strand=True,
         return_methyl=None,
+        return_fragment_end_clipped=None,
     ):
         """Iterate over all fragments that overlap contig:start-stop.
 
@@ -614,9 +649,10 @@ class FragmentsH5:
                 return_gc=return_gc,
                 return_strand=return_strand,
                 return_methyl=return_methyl,
+                return_fragment_end_clipped=return_fragment_end_clipped,
             )
 
-            for frag_start, frag_stop, mapq, gc, strand, num_cpgs, num_meth_cpgs in zip(
+            for frag_start, frag_stop, mapq, gc, strand, num_cpgs, num_meth_cpgs, fec in zip(
                 frag_starts,
                 frag_stops,
                 supp_data["mapq"],
@@ -624,6 +660,10 @@ class FragmentsH5:
                 supp_data.get("strand", [None] * len(frag_starts)),
                 supp_data.get("num_cpgs", [None] * len(frag_starts)),
                 supp_data.get("num_meth_cpgs", [None] * len(frag_starts)),
+                supp_data.get(
+                    "fragment_end_clipped",
+                    numpy.full(len(frag_starts), 255, dtype="uint8"),
+                ),
             ):
                 yield Fragment(
                     chrom=contig,
@@ -633,6 +673,7 @@ class FragmentsH5:
                     mapq2=_negative_1_to_none(mapq[1]),
                     gc=_nan_to_none(gc),
                     strand=_optional_binary_to_strand(strand),
+                    fragment_end_clipped=None if fec == 255 else bool(fec),
                     #num_cpgs=num_cpgs,
                     #num_meth_cpgs=num_meth_cpgs,
                 )
@@ -665,129 +706,163 @@ class FragmentsH5:
 
 
 def build_sub_fragments_h5(args):
-    """Collect, assemble, and compress all of the fragmnet data for a single contig.
+    """Collect, assemble, and compress all of the fragment data for a single contig.
 
+    Runs inside a temporary working directory so S3/remote BAM index/cache files
+    do not overlap when multiple workers run (each task gets its own CWD; cleanup on exit).
+    
+    TODO: Pass methylation data into Fragment in fetch() or remove dead code (lines 650-673).
     """
-    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, tmp_dir_name = args
+    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
 
     if single_end:
         input_to_fragments = single_end_bam_to_fragments
     else:
         input_to_fragments =  bam_to_fragments
 
-    fasta_file = pysam.FastaFile(fasta_filename) if fasta_filename is not None else None
+    with _temporary_working_directory():
+        fasta_file = pysam.FastaFile(fasta_filename) if fasta_filename is not None else None
 
-    # initialize all of the storage arrays
-    # we do this in numpy arrays that we copy into the h5 for performance reasons
-    starts_arr = numpy.zeros(0, dtype="int32")
-    lengths_arr = numpy.zeros(0, dtype="uint16")
-    mapq_arr = numpy.zeros((0, 2), dtype="uint8")
-    gc_arr = numpy.zeros(0, dtype="uint8")
-    strand_arr = numpy.zeros(0, dtype="|S1")
+        # initialize all of the storage arrays
+        # we do this in numpy arrays that we copy into the h5 for performance reasons
+        starts_arr = numpy.zeros(0, dtype="int32")
+        lengths_arr = numpy.zeros(0, dtype="uint16")
+        mapq_arr = numpy.zeros((0, 2), dtype="uint8")
+        gc_arr = numpy.zeros(0, dtype="uint8")
+        strand_arr = numpy.zeros(0, dtype="|S1")
 
-    # We record the number of CpGs not in the whole fragment, but the overlap of the pair of sequenced reads
-    # Each read has a maximum length of 150, for a total of 300. CpGs take 2 bp, so max number is 150 < 256
-    methyl_arrays = {key: numpy.zeros(0, dtype="uint8") for key in methyl_keys}
+        # We record the number of CpGs not in the whole fragment, but the overlap of the pair of sequenced reads
+        # Each read has a maximum length of 150, for a total of 300. CpGs take 2 bp, so max number is 150 < 256
+        methyl_arrays = {key: numpy.zeros(0, dtype="uint8") for key in methyl_keys}
 
-    # if there aren't any fragments then ff is never set. This fixes that edge case.
-    ff = 0
-    for fragment in input_to_fragments(
-        input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates
-    ):
-        # if we have filled this chunk then resize the array
-        if ff % CHUNK_SIZE == 0:
-            starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
-            lengths_arr.resize(lengths_arr.shape[0] + CHUNK_SIZE)
-            mapq_arr.resize((mapq_arr.shape[0] + CHUNK_SIZE, 2))
+        fragment_end_clipped_arr = numpy.zeros(0, dtype="uint8") if store_fragment_end_clipped else None
+
+        # if there aren't any fragments then ff is never set. This fixes that edge case.
+        ff = 0
+        for fragment in input_to_fragments(
+            input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates
+        ):
+            # if we have filled this chunk then resize the array
+            if ff % CHUNK_SIZE == 0:
+                starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
+                lengths_arr.resize(lengths_arr.shape[0] + CHUNK_SIZE)
+                mapq_arr.resize((mapq_arr.shape[0] + CHUNK_SIZE, 2))
+                if read_gc:
+                    gc_arr.resize(gc_arr.shape[0] + CHUNK_SIZE)
+                if read_strand:
+                    strand_arr.resize(strand_arr.shape[0] + CHUNK_SIZE)
+                if read_methyl:
+                    for key in list(methyl_arrays.keys()):
+                        methyl_arrays[key] = numpy.resize(methyl_arrays[key], methyl_arrays[key].shape[0] + CHUNK_SIZE)
+                if store_fragment_end_clipped:
+                    fragment_end_clipped_arr.resize(fragment_end_clipped_arr.shape[0] + CHUNK_SIZE)
+
+            # set all of the data
+            starts_arr[ff] = fragment.start
+            lengths_arr[ff] = fragment.length
+
+            # TODO: Explore if mutating Fragment objects (which use __slots__ and are dataclasses) 
+            # violates the immutability design pattern and should be refactored.
+            if fragment.mapq1 == 255:
+                if set_mapq_255_to_none:
+                    fragment.mapq1 = None
+                else:
+                    assert False, (
+                        f"{fragment} has MAPQ1 of 255. Make sure this is as intended, "
+                        f"and retry with set_mapq_255_to_none=True"
+                    )
+            if fragment.mapq2 == 255:
+                if set_mapq_255_to_none:
+                    fragment.mapq2 = None
+                else:
+                    assert False, (
+                        f"{fragment} has MAPQ2 of 255. Make sure this is as intended,"
+                        f" and retry with set_mapq_255_to_none=True"
+                    )
+
+            mapq_arr[ff, 0] = 255 if fragment.mapq1 is None else fragment.mapq1
+            mapq_arr[ff, 1] = 255 if fragment.mapq2 is None else fragment.mapq2
+
             if read_gc:
-                gc_arr.resize(gc_arr.shape[0] + CHUNK_SIZE)
+                if not ((fragment.gc is None or numpy.isnan(fragment.gc)) or 0 <= fragment.gc <= 1):
+                    raise ValueError(f"{fragment.gc} is invalid for {fragment}")
+                gc_arr[ff] = (
+                    255 if (fragment.gc is None or numpy.isnan(fragment.gc)) else int(round(fragment.gc * 254))
+                )
+
             if read_strand:
-                strand_arr.resize(strand_arr.shape[0] + CHUNK_SIZE)
+                strand_arr[ff] = fragment.strand
+
             if read_methyl:
-                for key in list(methyl_arrays.keys()):
-                    methyl_arrays[key] = numpy.resize(methyl_arrays[key], methyl_arrays[key].shape[0] + CHUNK_SIZE)
-
-        # set all of the data
-        starts_arr[ff] = fragment.start
-        lengths_arr[ff] = fragment.length
-
-        if fragment.mapq1 == 255:
-            if set_mapq_255_to_none:
-                fragment.mapq1 = None
-            else:
-                assert False, (
-                    f"{fragment} has MAPQ1 of 255. Make sure this is as intended, "
-                    f"and retry with set_mapq_255_to_none=True"
+                methyl_arrays['num_cpgs'][ff] = (
+                    fragment.methyl_counts.unconverted_cpgs + fragment.methyl_counts.converted_cpgs
                 )
-        if fragment.mapq2 == 255:
-            if set_mapq_255_to_none:
-                fragment.mapq2 = None
-            else:
-                assert False, (
-                    f"{fragment} has MAPQ2 of 255. Make sure this is as intended,"
-                    f" and retry with set_mapq_255_to_none=True"
+                methyl_arrays['num_converted_cpgs'][ff] = fragment.methyl_counts.converted_cpgs
+                methyl_arrays['num_cytosines'][ff] = (
+                    fragment.methyl_counts.unconverted_cytosines + fragment.methyl_counts.converted_cytosines
                 )
+                methyl_arrays['num_converted_cytosines'][ff] = fragment.methyl_counts.converted_cytosines
 
-        mapq_arr[ff, 0] = 255 if fragment.mapq1 is None else fragment.mapq1
-        mapq_arr[ff, 1] = 255 if fragment.mapq2 is None else fragment.mapq2
+            if store_fragment_end_clipped:
+                if fragment.fragment_end_clipped is None:
+                    fragment_end_clipped_arr[ff] = 255
+                else:
+                    fragment_end_clipped_arr[ff] = 1 if fragment.fragment_end_clipped else 0
 
+            # Increment number of fragments once the fragment is processed
+            ff += 1
+
+        if fasta_file is not None:
+            fasta_file.close()
+
+        # if there are no fragments then there's nothing left to do
+        if ff == 0:
+            return None, None
+
+        # write the data into the h5 file (tmp_dir_name is absolute path from main process)
+        ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
+        f = h5py.File(ofname, "x")
+
+        # create the h5 storing all of this data
+        def mk_dataset(key, data, dtype):
+            f.create_dataset(
+                key, data=data[:ff], dtype=dtype,
+                compression="gzip", compression_opts=4, chunks=True
+            )
+
+        mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
+        assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
+
+        mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
+        mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
         if read_gc:
-            if not ((fragment.gc is None or numpy.isnan(fragment.gc)) or 0 <= fragment.gc <= 1):
-                raise ValueError(f"{fragment.gc} is invalid for {fragment}")
-            gc_arr[ff] = (
-                255 if (fragment.gc is None or numpy.isnan(fragment.gc)) else int(round(fragment.gc * 254))
-            )
-
+            mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
         if read_strand:
-            strand_arr[ff] = fragment.strand
-
+            mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
         if read_methyl:
-            methyl_arrays['num_cpgs'][ff] = (
-                fragment.methyl_counts.unconverted_cpgs + fragment.methyl_counts.converted_cpgs
-            )
-            methyl_arrays['num_converted_cpgs'][ff] = fragment.methyl_counts.converted_cpgs
-            methyl_arrays['num_cytosines'][ff] = (
-                fragment.methyl_counts.unconverted_cytosines + fragment.methyl_counts.converted_cytosines
-            )
-            methyl_arrays['num_converted_cytosines'][ff] = fragment.methyl_counts.converted_cytosines
+            for key, val in methyl_arrays.items():
+                mk_dataset(f"data/{contig}/{key}", val, "uint8")
+        if store_fragment_end_clipped:
+            mk_dataset(f"data/{contig}/fragment_end_clipped", fragment_end_clipped_arr, "uint8")
 
-        # Increment number of fragments once the fragment is processed
-        ff += 1
+        f.close()
 
-    if fasta_file is not None:
-        fasta_file.close()
+        return contig, ofname
 
-    # if there are no fragments then there's nothing left to do
-    if ff == 0:
-        return None, None
 
-    # write the data into the h5 file
-    ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
-    f = h5py.File(ofname, "x")
-
-    # create the h5 storing all of this data
-    def mk_dataset(key, data, dtype):
-        f.create_dataset(
-            key, data=data[:ff], dtype=dtype,
-            compression="gzip", compression_opts=4, chunks=True
-        )
-
-    mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
-    assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
-
-    mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
-    mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
-    if read_gc:
-        mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
-    if read_strand:
-        mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
-    if read_methyl:
-        for key, val in methyl_arrays.items():
-            mk_dataset(f"data/{contig}/{key}", val, "uint8")
-
-    f.close()
-
-    return contig, ofname
+@contextmanager
+def _temporary_working_directory(prefix="fragments_h5_worker_"):
+    """Context manager: run in a temporary directory, then restore CWD and remove it.
+    Used so each worker task (e.g. S3 BAM reads) has its own CWD for index/cache files.
+    Uses tempfile.TemporaryDirectory for creation and cleanup; we only add chdir/restore.
+    """
+    prev = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
+        os.chdir(tmpdir)
+        try:
+            yield tmpdir
+        finally:
+            os.chdir(prev)
 
 
 def _pool_worker_init():
@@ -816,6 +891,7 @@ def build_fragments_h5(
     single_end=False,
     num_processes=None,
     include_duplicates=False,
+    store_fragment_end_clipped=True,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -882,7 +958,7 @@ def build_fragments_h5(
 
             args.append((
                 input_fname, contig, fasta_filename, single_end,
-                read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, tmp_dir
+                read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir
             ))
 
         # Use 'forkserver' for a good balance of safety and performance.

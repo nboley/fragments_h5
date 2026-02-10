@@ -157,9 +157,6 @@ def profile(seq_len, n_seq, n_test_iterations):
 ################################################################################
 
 
-RC_map = {ord('A'): ord('T'), ord('C'): ord('G'), ord('G'): ord('C'), ord('T'): ord('A'), ord('N'): ord('N')}
-
-
 def RC_map(base):
     if base == <char> b'A':
         return b'T'

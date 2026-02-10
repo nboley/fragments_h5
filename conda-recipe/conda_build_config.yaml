@@ -1,0 +1,7 @@
+# Limit Python versions to avoid solver picking 3.14 where pysam has no compatible build.
+# Build for 3.10–3.13 only.
+python:
+  - "3.10"
+  - "3.11"
+  - "3.12"
+  - "3.13"

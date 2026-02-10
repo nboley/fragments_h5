@@ -74,3 +74,16 @@ def test_fragment_strand_normalization():
     f2 = Fragment(chrom="chr1", start=0, stop=100, strand=b"+")
     assert f1.strand == "+"
     assert f2.strand == "+"
+
+
+def test_fragment_end_clipped_field():
+    # fragment_end_clipped is optional; None when unknown
+    f = Fragment(chrom="chr1", start=0, stop=100)
+    assert f.fragment_end_clipped is None
+
+    f = Fragment(chrom="chr1", start=0, stop=100, fragment_end_clipped=False)
+    assert f.fragment_end_clipped is False
+
+    f = Fragment(chrom="chr1", start=0, stop=100, fragment_end_clipped=True)
+    assert f.fragment_end_clipped is True
+    assert "fragment_end_clipped=True" in repr(f)

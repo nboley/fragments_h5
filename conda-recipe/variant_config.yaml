@@ -1,0 +1,6 @@
+# Variant configuration for rattler-build
+# This file defines the build matrix for different Python versions
+
+# Build for latest supported Python version only (for publishing to JFrog Artifactory)
+python:
+  - "3.13"

@@ -2,6 +2,76 @@
 
 Fragments h5 is a python library that implements a fast and memory efficient method for storing DNA sequencing fragments. It was developed for the analysis of cell-free-DNA fragments using fragmentomics approaches. See this paper for a brief overview of the field: https://www.nature.com/articles/s41416-021-01635-z
 
+## Building Conda Package
+
+Build the conda package using rattler-build (builds for Python 3.13, linux-64 platform):
+
+```bash
+make conda-build
+```
+
+Or manually:
+
+```bash
+rattler-build build \
+    --recipe conda-recipe/recipe.yaml \
+    --output-dir conda-build-output \
+    --channel conda-forge \
+    --channel bioconda \
+    --variant-config conda-recipe/variant_config.yaml
+```
+
+## Publishing to JFrog Artifactory
+
+To build and publish the conda package to JFrog Artifactory:
+
+```bash
+# Set required environment variables
+export ARTIFACTORY_HOST="karius.jfrog.io"
+export ARTIFACTORY_USER="your-username"
+export ARTIFACTORY_TOKEN="your-api-token"
+
+# Build and publish
+make conda
+```
+
+Or run separately:
+
+```bash
+make conda-build     # Build only
+make conda-publish   # Publish only
+```
+
+Install from Artifactory:
+
+```bash
+conda install -c https://karius.jfrog.io/artifactory/api/conda/karius-conda fragments-h5
+```
+
+See [CONDA_PUBLISHING.md](../CONDA_PUBLISHING.md) for detailed publishing documentation.
+
+See `RATTLER_BUILD_MIGRATION.md` in the repository root for more details on the build system.
+
+## Building the Docker image
+
+From the repository root, build the image (version is read from `pyproject.toml`):
+
+```bash
+make docker
+```
+
+This produces `fragments-h5:$(VERSION)` and `fragments-h5:latest`. To override the version:
+
+```bash
+VERSION=2.4.0 make docker
+```
+
+To push to GitHub Container Registry (after `make docker`):
+
+```bash
+make push
+```
+
 ## Quick Start
 
 First, convert your bam to a fragment h5 using the build-fragments-h5 command. 
@@ -16,6 +86,7 @@ We can use h5ls to inspect the h5 file.
 /                        Group
 /data                    Group
 /data/chr6               Group
+/data/chr6/fragment_end_clipped  Dataset {677}   (optional; present when built with default options)
 /data/chr6/lengths       Dataset {677}
 /data/chr6/mapq          Dataset {677, 2}
 /data/chr6/starts        Dataset {677}
@@ -27,9 +98,7 @@ We can use h5ls to inspect the h5 file.
 
 Next, open up your favorite python interface to load the fragments h5.
 ```
-Python 3.7.1 | packaged by conda-forge | (default, Feb 18 2019, 01:42:00) 
-Type 'copyright', 'credits' or 'license' for more information
-IPython 7.1.1 -- An enhanced Interactive Python. Type '?' for help.
+Python 3.10+ required
 
 In [1]: from fragments_h5 import FragmentsH5                                                                                                                                                                                                                                              
 In [2]: fh5 = FragmentsH5("./small.chr6.fragments.h5")                                                                                                                                                                                                                                    
@@ -69,7 +138,8 @@ name                   : alias for filename
 ref                    : the name of the reference genome
 sample_id              : identifier for the sample that this data originates from (set at creation time)
 has_methyl             : whether or not the fragment h5 contains cpg and converted cpg counts
-has_strand             : where or not the fragment h5 conmtains strand information
+has_strand             : whether or not the fragment h5 contains strand information
+has_fragment_end_clipped : whether or not the fragment h5 contains the fragment_end_clipped flag (0/1/255 per fragment)
 max_fragment_length    : the maximum fragment length stored
 fragment_length_counts : an array of fragment counts for each fragment length from 0 to max_fragment_length
 ```
@@ -81,7 +151,7 @@ Args:
     fname (str)             : path to fragment h5 file.
     mode (str)              : mode to load the h5 file in. (defaults to 'r')
     cache_pointers (bool)   : Whether or not to load the index into memory. (defaults to False)
-        NOTE: This feature is currently disabled (no-op) due to file size bloat issues.
+        NOTE: This feature is currently disabled (no-op).
         TODO: Re-implement cache_pointers with a more memory-efficient approach.
 
 Returns:
@@ -102,6 +172,7 @@ Args:
     return_gc (bool, optional): return fragments' gc content (defaults to False)
     return_strand (bool, optional): return fragments' strand (defaults to False)
     return_methyl (bool, optional): return fragments' cpg and converted cpg counts (defaults to False)
+    return_fragment_end_clipped (bool, optional): return fragment_end_clipped flag; 0=False, 1=True, 255=unknown (defaults to has_fragment_end_clipped)
     filter_to_midpoint_frags (bool, optional): only return fragments whose midpoints are contained in
                                                the filter region (defaults to returning all overlapping
                                                fragments)
@@ -124,8 +195,11 @@ Returns:
         strand        -> numpy.char1 array containing '+' or '-' for the fragment strand
 
         (only set if return_methyl is set to True)
-        num_cpgs      -> numpy.uint8 array containing number of cpgs in the fragment
-        num_meth_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragmnet
+        num_cpgs          -> numpy.uint8 array containing number of cpgs in the fragment
+        num_converted_cpgs -> numpy.uint8 array containing number of converted cpgs in the fragment
+
+        (only set if return_fragment_end_clipped is set to True)
+        fragment_end_clipped -> numpy.uint8 array; 0=not clipped, 1=clipped at fragment end (cigar/MC), 255=unknown
     }
 ```
 
@@ -164,6 +238,8 @@ optional arguments:
   --read-methyl         Parse cpg's and converted cpg's from YM tag
   --single-end          Sequencing is single ended (useful for long read
                         technologies)
+  --no-store-fragment-end-clipped
+                        Do not store the fragment_end_clipped flag (default: store it)
   --num-processes NUM_PROCESSES
                         Num of processes to use (defaults to 1 -- use 'all'
                         for all cores)

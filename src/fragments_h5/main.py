@@ -32,8 +32,18 @@ def parse_args():
     parser.add_argument(
         "--num-processes", default='1', help="Num of processes to use (defaults to 1 -- use 'all' for all cores)"
     )
+    parser.add_argument(
+        "--no-store-fragment-end-clipped", dest="store_fragment_end_clipped",
+        action="store_false", default=True,
+        help="Do not store fragment_end_clipped flag (default: store it)",
+    )
 
     return parser.parse_args()
+
+
+def _is_remote_url(path: str) -> bool:
+    """True if path looks like a remote URL (S3, HTTP) that should not be indexed via samtools."""
+    return path.startswith("s3://") or path.startswith("http://") or path.startswith("https://")
 
 
 def main():
@@ -43,9 +53,16 @@ def main():
 
     with pysam.AlignmentFile(args.input_bam) as bam:
         if not bam.has_index():
+            if _is_remote_url(args.input_bam):
+                raise SystemExit(
+                    "Remote BAM (s3:// or http(s)://) has no index. "
+                    "build-fragments-h5 requires an indexed BAM; ensure the .bai exists "
+                    "(e.g. s3://bucket/file.bam.bai for s3://bucket/file.bam)."
+                )
             import subprocess
             subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
 
+    # TODO: Add validation for num_processes with user-friendly error message
     if args.num_processes.lower() == 'all':
         num_processes = None
     else:
@@ -62,6 +79,7 @@ def main():
         single_end=args.single_end,
         num_processes=num_processes,
         include_duplicates=args.include_duplicates,
+        store_fragment_end_clipped=args.store_fragment_end_clipped,
     )
 
 

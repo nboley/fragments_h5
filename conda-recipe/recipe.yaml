@@ -1,0 +1,54 @@
+schema_version: 1
+
+context:
+  name: fragments-h5
+  version: "2.5.0"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script:
+    - python setup.py build_ext --inplace
+    - rm -f src/fragments_h5/sequence.c  # Remove generated C file before installing
+    - python -m pip install . --no-deps --no-build-isolation -vv
+  # Entry points are automatically detected from setup.py, but we can also define them explicitly:
+  # python:
+  #   entry_points:
+  #     - build-fragments-h5 = fragments_h5.main:main
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+  host:
+    # Pin to <3.14 to avoid conda solver picking python 3.14 where pysam has no compatible build.
+    - python
+    - pip
+    - setuptools >=61.0
+    # Cython 3.x generates NumPy 2-compatible C when building from sequence.pyx.
+    - cython >=3.0
+    - numpy >=1.26
+  run:
+    - python
+    - numpy >=1.26
+    - h5py
+    - pysam
+
+tests:
+  - python:
+      imports:
+        - fragments_h5
+  - script:
+      - build-fragments-h5 --help
+
+about:
+  homepage: https://github.com/nboley/fragments_h5
+  license: GPL-3.0-or-later
+  license_family: GPL
+  license_file: LICENSE
+  summary: Fast method for storing and querying DNA fragments

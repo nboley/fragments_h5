@@ -149,6 +149,9 @@ dmypy.json
 # pytype static type analyzer
 .pytype/
 
+# Cython: generated C from .pyx (built from source at install time)
+src/fragments_h5/sequence.c
+
 # Cython debug symbols
 cython_debug/
 

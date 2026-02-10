@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools >= 61.0", "Cython", "numpy"]
+requires = ["setuptools >= 61.0", "Cython >= 3.0", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.3.0"
+version = "2.5.0"
 dependencies = [
   "numpy",
   "h5py",
@@ -19,7 +19,7 @@ maintainers = [
 ]
 description = "Fast method for storing and querying DNA fragments"
 readme = "README.md"
-license = {text = "GPL-3.0-or-later"}
+license = "GPL-3.0-or-later"
 keywords = ["fragmentomics"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -31,3 +31,9 @@ Repository = "https://github.com/nboley/fragments_h5"
 
 [project.scripts]
 build-fragments-h5 = "fragments_h5.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = ["pytest"]

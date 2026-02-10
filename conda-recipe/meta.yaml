@@ -1,5 +1,5 @@
 {% set name = "fragments-h5" %}
-{% set version = "2.3.0" %}
+{% set version = "2.5.0" %}
 
 package:
   name: {{ name|lower }}
@@ -11,23 +11,29 @@ source:
 build:
   number: 0
   script: |
-    {{ PYTHON }} setup.py build_ext --inplace
-    {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+    python setup.py build_ext --inplace
+    python -m pip install . --no-deps --no-build-isolation -vv
   entry_points:
     - build-fragments-h5 = fragments_h5.main:main
+
+# Explicit single output so conda-build's parser matches "parsed outputs" to "raw metadata blocks".
+outputs:
+  - name: {{ name|lower }}
 
 requirements:
   build:
     - {{ compiler('c') }}
   host:
-    - python >=3.10
+    # Pin to <3.14 to avoid conda solver picking python 3.14 where pysam has no compatible build.
+    - "python >=3.10,<3.14"
     - pip
     - setuptools >=61.0
-    - cython
-    - numpy
+    # Cython 3.x generates NumPy 2-compatible C when building from sequence.pyx.
+    - "cython >=3.0"
+    - "numpy >=1.26"
   run:
-    - python >=3.10
-    - numpy
+    - "python >=3.10,<3.14"
+    - "numpy >=1.26"
     - h5py
     - pysam
 

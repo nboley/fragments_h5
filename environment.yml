@@ -12,4 +12,5 @@ dependencies:
   - cython
   - pip
   - c-compiler
+  - rattler-build  # For building conda packages
 

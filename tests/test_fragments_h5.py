@@ -6,6 +6,17 @@ import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5, bam_to_fragments
 
+# TODO: Add test coverage for the following missing test cases:
+# - MethylCounts and YM tag parsing (fragment.py)
+# - Single-end BAM processing (single_end_bam_to_fragments)
+# - set_mapq_255_to_none flag
+# - allowed_contigs / --contigs filtering
+# - Methylation (read_methyl=True)
+# - Empty BAM files
+# - BAM/FASTA contig length mismatches
+# - sequence.pyx Cython module (one_hot_encode_sequences, reverse_complement, etc.)
+# - _logging.py utilities
+
 DATA_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "./data/")
 
 # importing from datasets was giving me a circular import that i couldn't resolve, so copied this list here
@@ -64,15 +75,17 @@ def target_h5_path(target_bam_path, fasta_file_path):
 
 
 def test_build_small_h5(small_h5_path):
-    # just test that the fixture builds the fragment h5
-    # this also helps to make the timings more interpretable
-    pass
+    """Test that the fixture builds the fragment h5 successfully."""
+    assert os.path.exists(small_h5_path), f"Small H5 file was not created at {small_h5_path}"
+    with FragmentsH5(small_h5_path) as fh5:
+        assert len(fh5.contig_lengths) > 0, "H5 file should contain at least one contig"
 
 
 def test_build_target_h5(target_h5_path):
-    # just test that the fixture builds the fragment h5
-    # this also helps to make the timings more interpretable
-    pass
+    """Test that the fixture builds the target fragment h5 successfully."""
+    assert os.path.exists(target_h5_path), f"Target H5 file was not created at {target_h5_path}"
+    with FragmentsH5(target_h5_path) as fh5:
+        assert len(fh5.contig_lengths) > 0, "H5 file should contain at least one contig"
 
 
 def fragments_eq(f1, f2):
@@ -359,3 +372,96 @@ def test_include_duplicates(duplicates_bam_path, fasta_file_path):
         
         fh5_no_dups.close()
         fh5_with_dups.close()
+
+
+def test_fragment_end_clipped_storage_and_read(
+    bam_path, fasta_file_path
+):
+    """Test that fragment_end_clipped is stored/omitted based on args and read/counted correctly.
+
+    - Build with store_fragment_end_clipped=True (default): file has the dataset; counts from
+      fetch_array(return_fragment_end_clipped=True) match counts from bam_to_fragments.
+    - Build with store_fragment_end_clipped=False: file does not have the dataset; requesting
+      return_fragment_end_clipped=True raises.
+    """
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # --- Ground truth: count fragment_end_clipped from BAM ---
+        bam_clipped_true = 0
+        bam_clipped_false = 0
+        bam_clipped_unknown = 0
+        bam_total = 0
+        for frag in bam_to_fragments(
+            bam_path,
+            "chr6",
+            max_tlen=65535,
+            fasta_file=fasta_file_path,
+        ):
+            bam_total += 1
+            if frag.fragment_end_clipped is True:
+                bam_clipped_true += 1
+            elif frag.fragment_end_clipped is False:
+                bam_clipped_false += 1
+            else:
+                bam_clipped_unknown += 1
+
+        assert bam_total > 0, "test BAM should have at least one fragment on chr6"
+
+        # --- Build H5 with store_fragment_end_clipped=True (default) ---
+        h5_with_clipped = os.path.join(tmpdir, "with_clipped.h5")
+        build_fragments_h5(
+            bam_path,
+            h5_with_clipped,
+            fasta_filename=fasta_file_path,
+            store_fragment_end_clipped=True,
+            num_processes=1,
+        )
+
+        fh5_with = FragmentsH5(h5_with_clipped)
+        assert fh5_with.has_fragment_end_clipped is True
+
+        starts, stops, supp = fh5_with.fetch_array(
+            "chr6", return_fragment_end_clipped=True
+        )
+        assert "fragment_end_clipped" in supp
+        fec = supp["fragment_end_clipped"]
+        assert fec.dtype in (np.uint8, np.dtype("uint8"))
+        assert len(fec) == len(starts) == fh5_with.n_fragments
+
+        read_clipped_true = int((fec == 1).sum())
+        read_clipped_false = int((fec == 0).sum())
+        read_clipped_unknown = int((fec == 255).sum())
+
+        assert read_clipped_true == bam_clipped_true
+        assert read_clipped_false == bam_clipped_false
+        assert read_clipped_unknown == bam_clipped_unknown
+        assert read_clipped_true + read_clipped_false + read_clipped_unknown == bam_total
+
+        # --- Build H5 with store_fragment_end_clipped=False ---
+        h5_without_clipped = os.path.join(tmpdir, "without_clipped.h5")
+        build_fragments_h5(
+            bam_path,
+            h5_without_clipped,
+            fasta_filename=fasta_file_path,
+            store_fragment_end_clipped=False,
+            num_processes=1,
+        )
+
+        fh5_without = FragmentsH5(h5_without_clipped)
+        assert fh5_without.has_fragment_end_clipped is False
+
+        with pytest.raises(ValueError, match="does not contain fragment_end_clipped"):
+            fh5_without.fetch_array("chr6", return_fragment_end_clipped=True)
+
+        # --- fetch() returns correct fragment_end_clipped when present ---
+        with_clipped_frags = list(
+            fh5_with.fetch(return_fragment_end_clipped=True)
+        )
+        assert len(with_clipped_frags) == bam_total
+        assert sum(1 for f in with_clipped_frags if f.fragment_end_clipped is True) == bam_clipped_true
+        assert sum(1 for f in with_clipped_frags if f.fragment_end_clipped is False) == bam_clipped_false
+        assert sum(1 for f in with_clipped_frags if f.fragment_end_clipped is None) == bam_clipped_unknown
+
+        fh5_with.close()
+        fh5_without.close()

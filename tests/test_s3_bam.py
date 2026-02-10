@@ -1,0 +1,90 @@
+"""Tests for reading BAMs from S3 via htslib streaming (no download).
+
+Requires:
+- pysam/htslib built with S3 support (libcurl)
+- AWS credentials (env or ~/.aws/credentials) if the bucket is not public
+- An indexed BAM at the URL (htslib looks for .bai at same path + .bai)
+"""
+import os
+import tempfile
+import pytest
+import pysam
+
+from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5
+
+# Test data on S3 (index must exist at same path + .bai)
+S3_BAM_URL = "s3://fragmentomics.kariusdx.com/nboley/fragments_h5_test_data/small.chr6.bam"
+
+
+def _is_remote_url(path: str) -> bool:
+    return path.startswith("s3://") or path.startswith("http://") or path.startswith("https://")
+
+
+def _pysam_can_open_s3():
+    """Try to open the S3 URL with pysam; return (True, None) on success, (False, reason) on skip/fail."""
+    if not S3_BAM_URL:
+        return False, "FRAGMENTS_H5_S3_BAM_URL not set"
+    if not _is_remote_url(S3_BAM_URL):
+        return False, "FRAGMENTS_H5_S3_BAM_URL is not a remote URL (s3:// or http(s)://)"
+    try:
+        with pysam.AlignmentFile(S3_BAM_URL) as bam:
+            _ = bam.references
+            if not bam.has_index():
+                return False, "BAM at S3 URL has no index (htslib expects .bai at same path)"
+            # One contig fetch to confirm range requests work
+            if bam.references:
+                contig = bam.references[0]
+                n = 0
+                for _ in bam.fetch(contig, 0, min(100000, bam.get_reference_length(contig) or 0)):
+                    n += 1
+                    if n >= 10:
+                        break
+    except Exception as e:
+        return False, f"pysam could not open S3 BAM: {e}"
+    return True, None
+
+
+@pytest.mark.skipif(
+    not S3_BAM_URL or not _is_remote_url(S3_BAM_URL),
+    reason="S3_BAM_URL must be a remote URL (s3:// or http(s)://)",
+)
+def test_pysam_opens_s3_bam():
+    """Test that pysam can open an S3 BAM URL and perform a small fetch (htslib streaming)."""
+    can, reason = _pysam_can_open_s3()
+    if not can:
+        pytest.skip(reason)
+    # If we get here, the skipif passed (URL set) and _pysam_can_open_s3 succeeded
+    assert can
+
+
+@pytest.mark.skipif(
+    not S3_BAM_URL or not _is_remote_url(S3_BAM_URL),
+    reason="S3_BAM_URL must be a remote URL (s3:// or http(s)://)",
+)
+def test_build_fragments_h5_from_s3_bam():
+    """Test building a fragments H5 from an S3 BAM path (streaming, no download).
+
+    Uses num_processes=1 to avoid multiprocessing + S3 handle issues.
+    Does not use --fasta so no reference streaming is required.
+    """
+    can, reason = _pysam_can_open_s3()
+    if not can:
+        pytest.skip(reason)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_h5 = os.path.join(tmpdir, "from_s3.fragments.h5")
+        build_fragments_h5(
+            S3_BAM_URL,
+            out_h5,
+            fasta_filename=None,
+            num_processes=1,
+        )
+        assert os.path.isfile(out_h5)
+        with FragmentsH5(out_h5) as fh5:
+            assert fh5.n_fragments >= 0
+            # At least one contig should have data if BAM has fragments
+            if fh5.contig_lengths:
+                contig = next(iter(fh5.contig_lengths))
+                if contig in fh5.data:
+                    starts, stops, _ = fh5.fetch_array(contig)
+                    assert len(starts) == len(stops)

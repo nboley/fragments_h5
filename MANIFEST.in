@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include setup.py
+recursive-include src/fragments_h5 *.py *.pyx
+recursive-exclude src/fragments_h5 *.c
+global-exclude __pycache__
+global-exclude *.py[co]

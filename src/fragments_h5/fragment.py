@@ -158,6 +158,7 @@ class Fragment:
         "strand",
         "cell_barcode",
         "methyl_counts",
+        "fragment_end_clipped",
     ]
 
     def __init__(
@@ -171,6 +172,7 @@ class Fragment:
         strand: Optional[str] = None,
         cell_barcode: Optional[str] = None,
         methyl_counts: Optional[dict] = None,
+        fragment_end_clipped: Optional[bool] = None,
     ):
         assert isinstance(start, (int, numpy.int64, numpy.int32))
         if strand in [b"+", b"-"]:
@@ -379,18 +381,6 @@ def bam_to_align(
                 align_.has_tag("MQ") and align_.get_tag("MQ") < min_mapq_
             )
 
-        if align_.has_tag("MC"):
-            # Check that fragment start/end has a cigar MATCH operator.
-            # Otherwise, fragment length will be off.
-            # We only do this if MC is set, because otherwise we would get different results depending on whether
-            # we used align1 or align2 to do the filtering.
-            # It should always be set in internal BAMs, but may not be for external ones.
-            is_invalid |= not cigar_fragment_end_matches(
-                align_.cigarstring, align_.is_reverse
-            ) or not cigar_fragment_end_matches(
-                align_.get_tag("MC"), align_.mate_is_reverse
-            )
-
         return is_invalid
 
     for align in align_iter:
@@ -507,6 +497,16 @@ def bam_to_fragments(
         else:
             methyl_counts = None
 
+        if align.has_tag("MC"):
+            fragment_end_clipped = not (
+                cigar_fragment_end_matches(align.cigarstring, align.is_reverse)
+                and cigar_fragment_end_matches(
+                    align.get_tag("MC"), align.mate_is_reverse
+                )
+            )
+        else:
+            fragment_end_clipped = None
+
         frag = Fragment(
             align.reference_name,
             frag_start,
@@ -517,6 +517,7 @@ def bam_to_fragments(
             strand=strand,
             cell_barcode=cell_barcode,
             methyl_counts=methyl_counts,
+            fragment_end_clipped=fragment_end_clipped,
         )
 
         yield frag
@@ -536,39 +537,38 @@ def single_end_bam_to_fragments(
     ):
     assert fasta_file is None
 
-    if chrom is None:
-        align_iter = pysam.AlignmentFile(alignment_file)
-    else:
-        align_iter = pysam.AlignmentFile(alignment_file).fetch(
-            chrom,
-        )
-
-    for align in align_iter:
-        if (
-            align.is_qcfail
-            or align.is_supplementary
-            or (not include_duplicates and align.is_duplicate)
-            or align.is_unmapped
-            or align.mapq < min_mapq
-        ): continue
-
-        if align.is_forward:
-            strand = "+"
-        elif align.is_reverse:
-            strand = "-"
+    with pysam.AlignmentFile(alignment_file) as af:
+        if chrom is None:
+            align_iter = af
         else:
-            assert False
+            align_iter = af.fetch(chrom)
 
-        frag = Fragment(
-            align.reference_name,
-            align.pos,
-            align.aend,
-            mapq1=align.mapq,
-            mapq2=None,
-            gc=None,
-            strand=strand,
-            cell_barcode=None,
-            methyl_counts=None,
-        )
-        yield frag
-    return
+        for align in align_iter:
+            if (
+                align.is_qcfail
+                or align.is_supplementary
+                or (not include_duplicates and align.is_duplicate)
+                or align.is_unmapped
+                or align.mapq < min_mapq
+            ): continue
+
+            if align.is_forward:
+                strand = "+"
+            elif align.is_reverse:
+                strand = "-"
+            else:
+                assert False
+
+            frag = Fragment(
+                align.reference_name,
+                align.pos,
+                align.aend,
+                mapq1=align.mapq,
+                mapq2=None,
+                gc=None,
+                strand=strand,
+                cell_barcode=None,
+                methyl_counts=None,
+                fragment_end_clipped=None,
+            )
+            yield frag
