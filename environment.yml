@@ -9,6 +9,7 @@ dependencies:
   - numpy
   - h5py
   - pysam
+  - tqdm
   - cython
   - pip
   - c-compiler

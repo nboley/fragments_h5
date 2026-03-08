@@ -145,8 +145,8 @@ from contextlib import contextmanager
 
 import h5py
 import numpy
-
 import pysam
+from tqdm import tqdm
 
 import fragments_h5._logging as logging
 from fragments_h5.fragment import bam_to_fragments, single_end_bam_to_fragments, Fragment
@@ -817,7 +817,7 @@ def build_sub_fragments_h5(args):
 
         # if there are no fragments then there's nothing left to do
         if ff == 0:
-            return None, None
+            return contig, None
 
         # write the data into the h5 file (tmp_dir_name is absolute path from main process)
         ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
@@ -947,7 +947,7 @@ def build_fragments_h5(
     # This avoids fork-safety issues with HDF5 (forking with open HDF5 files
     # can cause deadlocks or data corruption).
     completed_results = []
-    
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         args = []
 
@@ -961,12 +961,15 @@ def build_fragments_h5(
                 read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir
             ))
 
+        # Total genomic bases to process, for progress tracking
+        total_bases = sum(contig_lengths[a[1]] for a in args)
+
         # Use 'forkserver' for a good balance of safety and performance.
         # - 'fork': Fast but unsafe (inherits parent's locks, threads, file handles)
         # - 'spawn': Safe but slow (starts fresh Python interpreter for each worker)
         # - 'forkserver': Safe AND fast (forks from a clean server process)
         ctx = multiprocessing.get_context('forkserver')
-        
+
         try:
             with ctx.Pool(
                 processes=num_processes,
@@ -975,17 +978,18 @@ def build_fragments_h5(
                 # Use imap_unordered for memory efficiency, but collect results
                 # to allow proper error handling before opening output file
                 results_iter = pool.imap_unordered(build_sub_fragments_h5, args)
-                
-                for i, result in enumerate(results_iter):
-                    contig, sub_h5_path = result
-                    if contig is not None:
-                        completed_results.append((contig, sub_h5_path))
-                    logger.info(f"Finished extracting fragments from contig ({i+1}/{len(args)})")
-                    
+
+                with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
+                    for result in results_iter:
+                        contig, sub_h5_path = result
+                        pbar.update(contig_lengths[contig])
+                        if sub_h5_path is not None:
+                            completed_results.append((contig, sub_h5_path))
+
         except KeyboardInterrupt:
             logger.warning("Received interrupt signal, terminating workers...")
             raise
-        
+
         # Check that we actually found some fragments
         if len(completed_results) == 0:
             raise ValueError(

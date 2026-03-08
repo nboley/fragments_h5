@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
   "numpy",
   "h5py",
   "pysam",
+  "tqdm",
 ]
 requires-python = ">=3.10"
 authors = [

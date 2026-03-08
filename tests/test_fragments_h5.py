@@ -465,3 +465,19 @@ def test_fragment_end_clipped_storage_and_read(
 
         fh5_with.close()
         fh5_without.close()
+
+
+def test_build_fails_if_output_exists(bam_path, fasta_file_path):
+    """Test that build_fragments_h5 raises when the output file already exists."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ofname = os.path.join(tmpdir, "existing.h5")
+        build_fragments_h5(
+            bam_path, ofname, fasta_filename=fasta_file_path, num_processes=1
+        )
+        assert os.path.exists(ofname)
+
+        # Building again to the same path should fail (h5py opens with mode 'x')
+        with pytest.raises(FileExistsError):
+            build_fragments_h5(
+                bam_path, ofname, fasta_filename=fasta_file_path, num_processes=1
+            )

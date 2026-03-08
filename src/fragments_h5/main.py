@@ -1,10 +1,13 @@
 import argparse
-import os.path
+import os
+import sys
 
 import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5
 import fragments_h5._logging as logging
+
+logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(parents=[logging.build_log_parser()])
@@ -50,6 +53,13 @@ def main():
     args = parse_args()
 
     logging.configure_root_logger_from_args(args)
+
+    if os.path.exists(args.output_frags_h5):
+        logger.error(
+            f"Output file '{args.output_frags_h5}' already exists. "
+            f"Please remove it or specify a different output path."
+        )
+        sys.exit(1)
 
     with pysam.AlignmentFile(args.input_bam) as bam:
         if not bam.has_index():

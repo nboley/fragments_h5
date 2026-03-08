@@ -2,7 +2,7 @@ schema_version: 1
 
 context:
   name: fragments-h5
-  version: "2.5.0"
+  version: "2.5.1"
 
 package:
   name: ${{ name }}
@@ -38,6 +38,7 @@ requirements:
     - numpy >=1.26
     - h5py
     - pysam
+    - tqdm
 
 tests:
   - python:
