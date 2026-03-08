@@ -13,11 +13,30 @@ This guide explains how to build and push Docker images and packages after makin
 
 ## Current Version
 
-The version is automatically read from `pyproject.toml` (currently **2.5.0**).
+The version is automatically read from `pyproject.toml` (currently **2.7.0**).
+
+## Changelog
+
+### v2.7.0 (2026-02-11)
+
+**Fixed:**
+- **Multiprocessing hang with small BAMs**: Switched from `forkserver` to `fork` start method
+  - Previous implementation caused race conditions when workers completed before forkserver initialization
+  - Fork is safe here because output HDF5 opened after all workers complete
+  - Added stress tests with 8 workers on single-contig BAMs to prevent regression
+
+**Added:**
+- Multiprocessing stress tests with timeouts (`test_multiprocessing_with_small_bam`, `test_multiprocessing_stress_test`)
+- pytest-timeout dependency for catching hangs in tests
+- Default 300-second timeout for all tests
+
+**Changed:**
+- Multiprocessing start method: `forkserver` → `fork`
+- Updated documentation to explain fork safety
 
 ## Building and Pushing Docker Image
 
-The Docker image will be pushed to `ghcr.io/nboley/fragments-h5:2.5.0` and `ghcr.io/nboley/fragments-h5:latest`.
+The Docker image will be pushed to `ghcr.io/nboley/fragments-h5:2.7.0` and `ghcr.io/nboley/fragments-h5:latest`.
 
 ### Quick Command
 ```bash
@@ -37,20 +56,20 @@ This will:
    ```bash
    make docker
    ```
-   This creates: `fragments-h5:2.5.0` and `fragments-h5:latest`
+   This creates: `fragments-h5:2.7.0` and `fragments-h5:latest`
 
 2. **Push to GHCR:**
    ```bash
    make push
    ```
-   This authenticates, tags, and pushes to `ghcr.io/nboley/fragments-h5:2.5.0`
+   This authenticates, tags, and pushes to `ghcr.io/nboley/fragments-h5:2.7.0`
 
 ### Custom Configuration
 
 Override defaults with environment variables:
 ```bash
 GITHUB_USER=your-org make push  # Use different GitHub org/user
-VERSION=2.5.0 make push         # Override version (defaults to pyproject.toml)
+VERSION=2.6.0 make push         # Override version (defaults to pyproject.toml)
 ```
 
 ## Building Conda Package
@@ -104,12 +123,12 @@ make tag  # Still need to tag separately
 
 After pushing, verify the Docker image:
 ```bash
-docker pull ghcr.io/nboley/fragments-h5:2.5.0
-docker run --rm ghcr.io/nboley/fragments-h5:2.5.0 build-fragments-h5 --help
+docker pull ghcr.io/nboley/fragments-h5:2.7.0
+docker run --rm ghcr.io/nboley/fragments-h5:2.7.0 build-fragments-h5 --help
 ```
 
 ## Troubleshooting
 
 - **Docker push fails**: Ensure `gh auth login` is completed
-- **Version mismatch**: Check `pyproject.toml` and `conda-recipe/meta.yaml` both have version 2.5.0
+- **Version mismatch**: Check that `pyproject.toml` and `conda-recipe/recipe.yaml` both have the same version
 - **Conda build fails**: Ensure conda-forge and bioconda channels are available

@@ -79,6 +79,27 @@ First, convert your bam to a fragment h5 using the build-fragments-h5 command.
 build-fragments-h5 test/data/small.chr6.bam ./small.chr6.fragments.h5
 ```
 
+### Using S3 URLs
+
+Both BAM and FASTA files can be read directly from S3 without downloading:
+
+```bash
+build-fragments-h5 \
+    s3://bucket/sample.bam \
+    ./output.fragments.h5 \
+    --fasta s3://bucket/reference.fa.gz
+```
+
+**Requirements for S3 streaming:**
+- pysam/htslib built with S3 support (libcurl)
+- AWS credentials configured (for non-public buckets)
+- Index files must exist at the same S3 path:
+  - BAM: `.bai` file (e.g., `s3://bucket/sample.bam.bai`)
+  - FASTA: `.fai` file (e.g., `s3://bucket/reference.fa.gz.fai`)
+  - Compressed FASTA: `.gzi` file also required (e.g., `s3://bucket/reference.fa.gz.gzi`)
+
+**Note:** When processing BAMs that cover entire genomes, the tool fetches complete chromosome sequences from the FASTA file, which is efficient as it minimizes the number of S3 requests.
+
 We can use h5ls to inspect the h5 file.
 
 ```
@@ -230,6 +251,11 @@ optional arguments:
   --debug               Output debug level log messages (and above) to the
                         output stream.
   --fasta FASTA         Path to a fasta file containing the reference genome.
+                        Supports local paths and S3 URLs (s3://bucket/file.fa.gz).
+                        For S3 FASTA files, the index file (.fai) must exist at
+                        the same S3 path. For compressed FASTA (.fa.gz), the .gzi
+                        index is also required. Requires pysam/htslib built with
+                        S3 support (libcurl) and AWS credentials for non-public buckets.
   --contigs CONTIGS [CONTIGS ...]
                         Restrict building the fragment h5 over these contigs.
   --set-mapq-255-to-none

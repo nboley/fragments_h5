@@ -964,11 +964,16 @@ def build_fragments_h5(
         # Total genomic bases to process, for progress tracking
         total_bases = sum(contig_lengths[a[1]] for a in args)
 
-        # Use 'forkserver' for a good balance of safety and performance.
-        # - 'fork': Fast but unsafe (inherits parent's locks, threads, file handles)
-        # - 'spawn': Safe but slow (starts fresh Python interpreter for each worker)
-        # - 'forkserver': Safe AND fast (forks from a clean server process)
-        ctx = multiprocessing.get_context('forkserver')
+        # Use 'fork' for fast startup with minimal overhead.
+        # Fork is safe here because:
+        # - Output HDF5 file is opened AFTER all workers complete (line 1001)
+        # - Workers open their own independent BAM/FASTA file handles
+        # - No shared locks or file handles exist at fork time
+        # - Each worker writes to isolated temp files
+        # Previous 'forkserver' implementation caused race conditions and hangs
+        # when workers completed before server initialization (common with small BAMs).
+        ctx = multiprocessing.get_context('fork')
+
 
         try:
             with ctx.Pool(
