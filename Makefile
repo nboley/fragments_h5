@@ -95,12 +95,19 @@ login: conda-login docker-login
 
 conda-build:
 	@echo "Building conda package with rattler-build..."
-	rattler-build build \
+	@rattler-build build \
 		--recipe conda-recipe/recipe.yaml \
 		--output-dir conda-build-output \
 		--channel conda-forge \
 		--channel bioconda \
-		--variant-config conda-recipe/variant_config.yaml || true
+		--variant-config conda-recipe/variant_config.yaml; \
+	BUILD_EXIT=$$?; \
+	if [ $$BUILD_EXIT -ne 0 ] && { [ ! -d conda-build-output ] || [ -z "$$(find conda-build-output -name '*.conda' 2>/dev/null)" ]; }; then \
+		echo "❌ Error: Conda build failed (exit code $$BUILD_EXIT)"; \
+		exit $$BUILD_EXIT; \
+	elif [ $$BUILD_EXIT -ne 0 ]; then \
+		echo "⚠️  Warning: Build succeeded but cleanup failed (exit code $$BUILD_EXIT) - this is a known rattler-build issue"; \
+	fi
 	@echo "Conda package built: conda-build-output/"
 
 conda-publish:

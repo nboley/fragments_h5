@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.5.0"
+version = "2.7.0"
 dependencies = [
   "numpy",
   "h5py",
@@ -36,4 +36,4 @@ build-fragments-h5 = "fragments_h5.main:main"
 where = ["src"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pytest-timeout"]

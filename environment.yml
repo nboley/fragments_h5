@@ -12,5 +12,7 @@ dependencies:
   - cython
   - pip
   - c-compiler
+  - pytest
+  - pytest-timeout
   - rattler-build  # For building conda packages
 

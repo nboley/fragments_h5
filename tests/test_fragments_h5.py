@@ -339,12 +339,7 @@ def test_pickle_support(small_h5_path):
 
 
 def test_include_duplicates(duplicates_bam_path, fasta_file_path):
-    """Test that include_duplicates parameter correctly includes/excludes duplicate-marked fragments.
-    
-    TODO: Investigate why this test hangs when num_processes > 1. The multiprocessing
-    may be causing deadlocks or issues with the small test BAM file. Currently using
-    num_processes=1 as a workaround.
-    """
+    """Test that include_duplicates parameter correctly includes/excludes duplicate-marked fragments."""
     with tempfile.TemporaryDirectory() as tmpdir:
         # Build h5 excluding duplicates (default)
         h5_no_dups = os.path.join(tmpdir, "no_dups.h5")
@@ -465,3 +460,59 @@ def test_fragment_end_clipped_storage_and_read(
 
         fh5_with.close()
         fh5_without.close()
+
+
+@pytest.mark.timeout(30)
+def test_multiprocessing_with_small_bam(duplicates_bam_path, fasta_file_path):
+    """Test that multiprocessing works correctly with small BAMs.
+    
+    This test specifically validates that using multiple workers with a tiny BAM
+    (only 4 reads, 1 contig) doesn't cause hangs or deadlocks. This scenario
+    previously caused issues with forkserver due to race conditions between
+    server initialization and quick job completion.
+    
+    We use more workers than contigs (8 workers, 1 contig) to stress-test
+    the edge case where some workers never get jobs.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_h5 = os.path.join(tmpdir, "multiproc_test.h5")
+        
+        # Use 8 workers with a BAM that has only 1 contig
+        # This is the worst-case scenario: many idle workers
+        build_fragments_h5(
+            duplicates_bam_path, 
+            output_h5, 
+            fasta_filename=fasta_file_path,
+            include_duplicates=True,
+            num_processes=8  # Much more than needed
+        )
+        
+        # Verify output is correct
+        fh5 = FragmentsH5(output_h5)
+        assert fh5.n_fragments == 2
+        fh5.close()
+
+
+@pytest.mark.timeout(60)
+def test_multiprocessing_stress_test(bam_path, fasta_file_path):
+    """Stress test multiprocessing by running multiple builds in sequence.
+    
+    This simulates running multiple tests back-to-back (as pytest does)
+    to ensure there are no state/cleanup issues between runs.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Run 5 builds in a row with different worker counts
+        for i, num_procs in enumerate([2, 4, 8, 1, 4]):
+            output_h5 = os.path.join(tmpdir, f"stress_test_{i}.h5")
+            
+            build_fragments_h5(
+                bam_path, 
+                output_h5, 
+                fasta_filename=fasta_file_path,
+                num_processes=num_procs
+            )
+            
+            # Quick validation
+            fh5 = FragmentsH5(output_h5)
+            assert fh5.n_fragments > 0
+            fh5.close()

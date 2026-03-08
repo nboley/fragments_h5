@@ -62,6 +62,21 @@ def main():
             import subprocess
             subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
 
+    # Validate FASTA file if provided
+    if args.fasta:
+        if _is_remote_url(args.fasta):
+            # For remote FASTA files, verify they can be opened (pysam will check for index)
+            try:
+                with pysam.FastaFile(args.fasta) as fasta:
+                    _ = fasta.references  # Access to verify it's readable
+            except Exception as e:
+                raise SystemExit(
+                    f"Failed to open remote FASTA file '{args.fasta}'. "
+                    f"Ensure the index file (.fai) exists at the same S3 path. "
+                    f"For compressed FASTA (.gz), the .gzi index is also required. "
+                    f"Error: {e}"
+                )
+
     # TODO: Add validation for num_processes with user-friendly error message
     if args.num_processes.lower() == 'all':
         num_processes = None

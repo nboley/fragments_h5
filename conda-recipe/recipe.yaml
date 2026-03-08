@@ -2,7 +2,7 @@ schema_version: 1
 
 context:
   name: fragments-h5
-  version: "2.5.0"
+  version: "2.7.0"
 
 package:
   name: ${{ name }}
@@ -45,6 +45,10 @@ tests:
         - fragments_h5
   - script:
       - build-fragments-h5 --help
+  - requirements:
+      run:
+        - pytest
+        - pytest-timeout
 
 about:
   homepage: https://github.com/nboley/fragments_h5
