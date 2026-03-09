@@ -916,6 +916,7 @@ def build_fragments_h5(
         raise NotImplementedError("Methylation tag parsing is not currently implemented for single ended reads")
 
     if fasta_filename is not None:
+        fasta_filename = os.path.abspath(fasta_filename)
         read_gc = True
     else:
         read_gc = False
