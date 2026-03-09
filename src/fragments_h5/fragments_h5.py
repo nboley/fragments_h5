@@ -921,6 +921,8 @@ def build_fragments_h5(
     else:
         read_gc = False
 
+    input_fname = os.path.abspath(input_fname)
+
     # save metadata about the bam into the h5.
     # In particular, find the contigs and lengths, and save them into the h5.
     # h5s dont support dictionaries natively, so
