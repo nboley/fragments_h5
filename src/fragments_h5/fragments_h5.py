@@ -964,36 +964,43 @@ def build_fragments_h5(
         # Total genomic bases to process, for progress tracking
         total_bases = sum(contig_lengths[a[1]] for a in args)
 
-        # Use 'fork' for fast startup with minimal overhead.
-        # Fork is safe here because:
-        # - Output HDF5 file is opened AFTER all workers complete (line 1001)
-        # - Workers open their own independent BAM/FASTA file handles
-        # - No shared locks or file handles exist at fork time
-        # - Each worker writes to isolated temp files
-        # Previous 'forkserver' implementation caused race conditions and hangs
-        # when workers completed before server initialization (common with small BAMs).
-        ctx = multiprocessing.get_context('fork')
+        if num_processes is not None and num_processes != 1:
+            # Use 'fork' for fast startup with minimal overhead.
+            # Fork is safe here because:
+            # - Output HDF5 file is opened AFTER all workers complete
+            # - Workers open their own independent BAM/FASTA file handles
+            # - No shared locks or file handles exist at fork time
+            # - Each worker writes to isolated temp files
+            # Previous 'forkserver' implementation caused race conditions and hangs
+            # when workers completed before server initialization (common with small BAMs).
+            ctx = multiprocessing.get_context('fork')
 
+            try:
+                with ctx.Pool(
+                    processes=num_processes,
+                    initializer=_pool_worker_init,
+                ) as pool:
+                    results_iter = pool.imap_unordered(build_sub_fragments_h5, args)
 
-        try:
-            with ctx.Pool(
-                processes=num_processes,
-                initializer=_pool_worker_init,
-            ) as pool:
-                # Use imap_unordered for memory efficiency, but collect results
-                # to allow proper error handling before opening output file
-                results_iter = pool.imap_unordered(build_sub_fragments_h5, args)
+                    with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
+                        for result in results_iter:
+                            contig, sub_h5_path = result
+                            pbar.update(contig_lengths[contig])
+                            if sub_h5_path is not None:
+                                completed_results.append((contig, sub_h5_path))
 
-                with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
-                    for result in results_iter:
-                        contig, sub_h5_path = result
-                        pbar.update(contig_lengths[contig])
-                        if sub_h5_path is not None:
-                            completed_results.append((contig, sub_h5_path))
-
-        except KeyboardInterrupt:
-            logger.warning("Received interrupt signal, terminating workers...")
-            raise
+            except KeyboardInterrupt:
+                logger.warning("Received interrupt signal, terminating workers...")
+                raise
+        else:
+            # Single-process path: call worker function directly to avoid
+            # any potential hangs from the multiprocessing machinery.
+            with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
+                for arg in args:
+                    contig, sub_h5_path = build_sub_fragments_h5(arg)
+                    pbar.update(contig_lengths[contig])
+                    if sub_h5_path is not None:
+                        completed_results.append((contig, sub_h5_path))
 
         # Check that we actually found some fragments
         if len(completed_results) == 0:
