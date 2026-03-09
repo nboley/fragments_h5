@@ -976,6 +976,7 @@ def build_fragments_h5(
             # - Each worker writes to isolated temp files
             # Previous 'forkserver' implementation caused race conditions and hangs
             # when workers completed before server initialization (common with small BAMs).
+            logger.info(f"Using multiprocessing with {num_processes} workers (fork context)")
             ctx = multiprocessing.get_context('fork')
 
             try:
@@ -998,6 +999,7 @@ def build_fragments_h5(
         else:
             # Single-process path: call worker function directly to avoid
             # any potential hangs from the multiprocessing machinery.
+            logger.info("Using single-process path")
             with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
                 for arg in args:
                     contig, sub_h5_path = build_sub_fragments_h5(arg)

@@ -1,3 +1,4 @@
+import logging
 import os
 import pytest
 import subprocess
@@ -532,3 +533,53 @@ def test_multiprocessing_stress_test(bam_path, fasta_file_path):
             fh5 = FragmentsH5(output_h5)
             assert fh5.n_fragments > 0
             fh5.close()
+
+
+@pytest.mark.timeout(30)
+def test_multiprocessing_pool_is_actually_used(bam_path, fasta_file_path, caplog):
+    """Verify that num_processes > 1 actually takes the multiprocessing code path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_h5 = os.path.join(tmpdir, "pool_check.h5")
+
+        with caplog.at_level(logging.INFO, logger="fragments_h5.fragments_h5"):
+            build_fragments_h5(
+                bam_path,
+                output_h5,
+                fasta_filename=fasta_file_path,
+                num_processes=4,
+            )
+
+        assert any(
+            "Using multiprocessing with 4 workers" in msg for msg in caplog.messages
+        ), (
+            f"Expected multiprocessing log message but got: {caplog.messages}"
+        )
+
+        fh5 = FragmentsH5(output_h5)
+        assert fh5.n_fragments > 0
+        fh5.close()
+
+
+@pytest.mark.timeout(30)
+def test_single_process_path_is_used(bam_path, fasta_file_path, caplog):
+    """Verify that num_processes=1 takes the single-process code path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_h5 = os.path.join(tmpdir, "single_check.h5")
+
+        with caplog.at_level(logging.INFO, logger="fragments_h5.fragments_h5"):
+            build_fragments_h5(
+                bam_path,
+                output_h5,
+                fasta_filename=fasta_file_path,
+                num_processes=1,
+            )
+
+        assert any(
+            "Using single-process path" in msg for msg in caplog.messages
+        ), (
+            f"Expected single-process log message but got: {caplog.messages}"
+        )
+
+        fh5 = FragmentsH5(output_h5)
+        assert fh5.n_fragments > 0
+        fh5.close()
