@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
-**Last Updated:** 2026-03-08
-**Version:** 2.7.1
+**Last Updated:** 2026-03-09
+**Version:** 2.8.0
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -30,7 +30,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.7.1
+- **Version:** 2.8.0
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
@@ -91,12 +91,14 @@ Optimization: Use block index to reduce searchsorted range
 
 ### 2.3 Multiprocessing Architecture
 
-**Build Pipeline:**
+**Build Pipeline (v2.8.0 — Chunk-Based Parallelization):**
 1. **Fork:** Uses `fork` start method for minimal overhead (safe because output HDF5 opened after workers complete)
 2. **Per-Worker Temp Dirs:** Each worker gets isolated temp directory for S3 index caching
-3. **Per-Contig Workers:** Workers process individual contigs, write to temp HDF5 files
-4. **Main Process Merge:** Main process opens output HDF5 after workers finish, copies contig data
+3. **Chunk-Based Workers:** Each contig is split into fixed-size genomic chunks (GENOMIC_CHUNK_SIZE = 10M bases). Each chunk is a work unit processed independently. Fragments are assigned to the chunk containing their start position. Workers fetch only the relevant BAM/FASTA region (with MAX_FRAGMENT_LENGTH buffer for GC).
+4. **Main Process Merge:** Chunks are grouped by contig, sorted by chunk_start, and arrays are concatenated to produce the final per-contig datasets.
 5. **Signal Handling:** Workers ignore SIGINT/SIGTERM; main process handles cleanup
+6. **Skip Chunking:** `--skip-chunking` flag reverts to whole-contig processing (each contig = one work unit)
+7. **Single Process:** When num_processes=1, work is executed directly in the main process (no fork overhead)
 
 **Why Fork is Safe Here:**
 - Output HDF5 file opened AFTER all workers complete (no open file handles at fork)
@@ -111,11 +113,11 @@ Optimization: Use block index to reduce searchsorted range
 
 **Worker Workflow:**
 ```python
-def worker_func(contig, bam_path, fasta_path, temp_output_path):
-    # Worker gets isolated temp dir for S3 indexes
-    with _temporary_working_directory():
-        fragments = list(bam_to_fragments(bam_path, contig, ...))
-        _write_contig_h5(temp_output_path, contig, fragments)
+def build_sub_fragments_h5(args):
+    # args = (bam_path, contig, chunk_start, chunk_stop, contig_length, ...)
+    # Worker fetches BAM region [chunk_start, chunk_stop) and filters fragments by start position
+    # FASTA fetched for region [chunk_start, chunk_stop + MAX_FRAG_LENGTH) for GC calculation
+    # Returns (contig, chunk_start, chunk_stop, temp_h5_path)
 ```
 
 ---
@@ -139,7 +141,9 @@ fragments_h5/
 │   ├── test_fragment.py        # Fragment dataclass tests
 │   ├── test_s3_bam.py          # S3 streaming tests (conditional)
 │   ├── test_create_duplicate_sam.py
-│   └── test_docker_build.py    # Manual Docker test
+│   ├── test_docker_build.py    # Manual Docker test
+│   └── specialized/            # Standalone comparison/integration tests
+│       └── compare_chunked_vs_unchunked.py  # Chunked vs unchunked + Docker comparison
 ├── scripts/
 │   ├── build_conda_package.sh
 │   └── publish_conda_package.sh
@@ -193,11 +197,11 @@ def build_fragments_h5(bam_fname, output_fname, fasta_filename=None,
                       allowed_contigs=None, set_mapq_255_to_none=False,
                       read_strand=True, read_methyl=False, single_end=False,
                       num_processes=1, include_duplicates=False,
-                      store_fragment_end_clipped=True):
+                      store_fragment_end_clipped=True, skip_chunking=False):
     """Main entry point for building fragment H5 from BAM"""
-    
+
 def build_sub_fragments_h5(args):
-    """Worker function for multiprocessing (per-contig builds)"""
+    """Worker function — processes one chunk (contig, chunk_start, chunk_stop)"""
 ```
 
 #### `fragment.py` (Data Classes and BAM Parsing)
@@ -266,6 +270,7 @@ def one_hot_encode_sequences(sequences: list[str]) -> np.ndarray:
   - `--include-duplicates`: Include duplicate-marked reads (default: exclude)
   - `--no-store-fragment-end-clipped`: Don't store clipping info
   - `--num-processes`: Number of workers (default: 1, use 'all' for all cores)
+  - `--skip-chunking`: Disable chunk-based parallelization, process each contig as a whole
   - Logging: `--quiet`, `--verbose`, `--debug`, `--log-filename`, etc.
 
 **Validation:**
@@ -995,9 +1000,10 @@ build-fragments-h5 input.bam output.h5 --fasta ref.fa.gz --num-processes all
 ### 15.3 Key Constants
 
 ```python
-INDEX_BLOCK_SIZE = 5000      # Genomic positions per index block
-CHUNK_SIZE = 1000000         # Array resize chunk size
-MAX_FRAGMENT_LENGTH = 65535  # uint16 limit
+INDEX_BLOCK_SIZE = 5000       # Genomic positions per index block
+CHUNK_SIZE = 1000000          # Array resize chunk size
+MAX_FRAGMENT_LENGTH = 65535   # uint16 limit
+GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 ```
 
 ### 15.4 Key Classes and Functions
@@ -1061,6 +1067,13 @@ MAX_FRAGMENT_LENGTH = 65535  # uint16 limit
 
 ---
 
-**Document Version:** 1.1
-**Last Updated:** 2026-03-08
+### v2.8.0 Changelog
+- **Chunk-based parallelization:** Contigs split into 10M-base chunks for balanced multiprocessing load. Eliminates bottleneck where large contigs (e.g., chr1 ~249M) serialize work.
+- **Float64 GC cumsum:** GC content cumulative sum uses float64 instead of float32, fixing precision loss on large chromosomes.
+- **`--skip-chunking` flag:** CLI option to disable chunking and revert to whole-contig processing.
+- **Single-process optimization:** When num_processes=1, work runs in-process without forking.
+- **Bug fix:** `contig_lengths` computation with `--contigs` filter was pairing contig names with wrong lengths.
+
+**Document Version:** 1.2
+**Last Updated:** 2026-03-09
 **Generated for:** Debugging and development assistance

@@ -396,11 +396,20 @@ def bam_to_align(
         fasta_file.close()
 
 
-def get_g_or_c_cumsum(fasta_file, chrom):
+def get_g_or_c_cumsum(fasta_file, chrom, region_start=None, region_stop=None):
+    """Build a cumulative sum array of G/C bases for GC fraction calculation.
+
+    If region_start and region_stop are provided, only fetches that sub-region
+    of the chromosome. The returned cumsum array is zero-indexed relative to
+    region_start, so callers must offset genomic coordinates accordingly:
+        gc = (cumsum[frag_stop - region_start] - cumsum[frag_start - region_start]) / length
+
+    When no region is specified, fetches the entire chromosome (original behavior).
+    """
     close_fasta_file = False
 
     if fasta_file is None:
-        return None
+        return None, 0
 
     if isinstance(fasta_file, (str, bytes)):
         fasta_file = pysam.FastaFile(fasta_file)
@@ -409,22 +418,27 @@ def get_g_or_c_cumsum(fasta_file, chrom):
     # ignore GC if the contig isn't in the fasta file
     if chrom not in fasta_file:
         if close_fasta_file: fasta_file.close()
-        return None
+        return None, 0
 
-    contig_seq = fasta_file.fetch(chrom)
-    # contig_seq = one_hot_encode_sequences([contig_seq.encode().ravel()])
-    # we add an 'a' to the beginning of the seqeunce because the fragment interval is open closed
-    # for example, image that we have a contig with sequence ccccaaaaaa (1 c's and 4 a's and 5 c's) and a fragment
+    if region_start is not None and region_stop is not None:
+        contig_seq = fasta_file.fetch(chrom, region_start, region_stop)
+        offset = region_start
+    else:
+        contig_seq = fasta_file.fetch(chrom)
+        offset = 0
+
+    # we add an 'a' to the beginning of the sequence because the fragment interval is open closed
+    # for example, imagine that we have a contig with sequence ccccaaaaaa and a fragment
     # with a start of 0 and an end of 1 (a one basepair fragment with sequence 'c'). The cumsum is
     #    x =  array([1., 1., 1., 1., 1., 2., 3., 4., 5., 6.], dtype=float32)
     # so x[1] - x[0] == 1 - 1 == 0
     # padding the beginning with zero fixes this edge condition
     seq = one_hot_encode_sequences([('a' + contig_seq).encode()])[0]
-    g_or_c_cumsum = seq[:, (1,2)].sum(axis=1).cumsum()
+    g_or_c_cumsum = seq[:, (1,2)].sum(axis=1).astype(numpy.float64).cumsum()
 
     if close_fasta_file: fasta_file.close()
 
-    return g_or_c_cumsum
+    return g_or_c_cumsum, offset
 
 
 def bam_to_fragments(
@@ -436,6 +450,8 @@ def bam_to_fragments(
     max_tlen=1000,
     min_mapq=DEFAULT_MIN_MAPQ,
     include_duplicates=False,
+    fasta_region_start=None,
+    fasta_region_stop=None,
 ):
     if isinstance(alignment_file, str):
         alignment_file = pysam.AlignmentFile(alignment_file)
@@ -443,7 +459,10 @@ def bam_to_fragments(
     else:
         close_alignment_file = False
 
-    g_or_c_cumsum = get_g_or_c_cumsum(fasta_file, chrom)
+    g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
+        fasta_file, chrom,
+        region_start=fasta_region_start, region_stop=fasta_region_stop
+    )
 
     align_iter = bam_to_align(
         alignment_file=alignment_file,
@@ -468,7 +487,7 @@ def bam_to_fragments(
             gc = None
         else:
             assert frag_stop > frag_start
-            gc = round(float(g_or_c_cumsum[frag_stop] - g_or_c_cumsum[frag_start])/float(frag_stop - frag_start), 5)
+            gc = round(float(g_or_c_cumsum[frag_stop - gc_offset] - g_or_c_cumsum[frag_start - gc_offset])/float(frag_stop - frag_start), 5)
 
         if align.is_read1:
             if align.is_forward:
@@ -534,6 +553,8 @@ def single_end_bam_to_fragments(
         max_tlen=1000,
         min_mapq=DEFAULT_MIN_MAPQ,
         include_duplicates=False,
+        fasta_region_start=None,
+        fasta_region_stop=None,
     ):
     assert fasta_file is None
 
@@ -541,7 +562,7 @@ def single_end_bam_to_fragments(
         if chrom is None:
             align_iter = af
         else:
-            align_iter = af.fetch(chrom)
+            align_iter = af.fetch(chrom, start, stop)
 
         for align in align_iter:
             if (
