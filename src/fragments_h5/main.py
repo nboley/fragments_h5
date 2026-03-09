@@ -40,6 +40,10 @@ def parse_args():
         action="store_false", default=True,
         help="Do not store fragment_end_clipped flag (default: store it)",
     )
+    parser.add_argument(
+        "--skip-chunking", default=False, action="store_true",
+        help="Disable chunk-based parallelization and process each contig as a whole",
+    )
 
     return parser.parse_args()
 
@@ -105,6 +109,7 @@ def main():
         num_processes=num_processes,
         include_duplicates=args.include_duplicates,
         store_fragment_end_clipped=args.store_fragment_end_clipped,
+        skip_chunking=args.skip_chunking,
     )
 
 

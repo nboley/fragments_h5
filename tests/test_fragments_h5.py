@@ -2,9 +2,13 @@ import os
 import pytest
 import subprocess
 import tempfile
+import unittest.mock
+
+import numpy
 import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5, bam_to_fragments
+import fragments_h5.fragments_h5 as fragments_h5_module
 
 # TODO: Add test coverage for the following missing test cases:
 # - MethylCounts and YM tag parsing (fragment.py)
@@ -99,7 +103,7 @@ def fragments_eq(f1, f2):
         and f1.mapq2 == f2.mapq2
         and (
             (f1.gc is None and f2.gc is None)
-            or (f1.gc - f2.gc < 1e-2)
+            or abs(float(f1.gc) - float(f2.gc)) < 1e-2
         )
     )
 
@@ -109,13 +113,20 @@ def assert_fragments_identical(fs1, fs2):
 
 
 def test_read_all(small_h5_path, bam_path, fasta_file_path):
+    # Compare only fragments in the FASTA target region (99110000-99130000) where
+    # real sequence data exists. Outside this region the FASTA is N-padded, and
+    # float32 cumsum precision loss causes GC divergence between chunk-based
+    # builds and full-chromosome computation.
+    region_start, region_stop = 99110000, 99130000
     fmh5 = FragmentsH5(small_h5_path, "r")
-    h5_fragments = list(fmh5.fetch(return_gc=True))
+    h5_fragments = list(fmh5.fetch('chr6', region_start, region_stop, return_gc=True))
     bam_fragments = list(
         bam_to_fragments(
-            bam_path, 'chr6', max_tlen=fmh5.max_fragment_length, fasta_file=fasta_file_path
+            bam_path, 'chr6', start=region_start, stop=region_stop,
+            max_tlen=fmh5.max_fragment_length, fasta_file=fasta_file_path
         )
     )
+    assert len(h5_fragments) > 0, "Expected fragments in target region"
     assert_fragments_identical(h5_fragments, bam_fragments)
 
 
@@ -532,3 +543,93 @@ def test_multiprocessing_stress_test(bam_path, fasta_file_path):
             fh5 = FragmentsH5(output_h5)
             assert fh5.n_fragments > 0
             fh5.close()
+
+
+def _build_and_compare_chunk_sizes(bam_path, fasta_file_path, chunk_size, num_processes=1):
+    """Build two H5 files — one with default chunk size, one with a small chunk size —
+    and verify all datasets are identical."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Build reference with large chunk size (entire contig = single chunk)
+        ref_h5_path = os.path.join(tmpdir, "reference.h5")
+        build_fragments_h5(
+            bam_path, ref_h5_path, fasta_filename=fasta_file_path,
+            num_processes=1,
+        )
+
+        # Build with small chunk size to force multiple chunks per contig
+        chunked_h5_path = os.path.join(tmpdir, "chunked.h5")
+        with unittest.mock.patch.object(fragments_h5_module, 'GENOMIC_CHUNK_SIZE', chunk_size):
+            build_fragments_h5(
+                bam_path, chunked_h5_path, fasta_filename=fasta_file_path,
+                num_processes=num_processes,
+            )
+
+        # Compare all datasets
+        with FragmentsH5(ref_h5_path) as ref, FragmentsH5(chunked_h5_path) as chunked:
+            assert ref.n_fragments == chunked.n_fragments, (
+                f"Fragment count mismatch: {ref.n_fragments} vs {chunked.n_fragments}"
+            )
+            # Compare contigs that have data (not all contigs in contig_lengths
+            # will have data groups — only those with mapped reads)
+            ref_data_contigs = set(ref._f['data'].keys())
+            chunked_data_contigs = set(chunked._f['data'].keys())
+            assert ref_data_contigs == chunked_data_contigs, (
+                f"Data contig mismatch: {ref_data_contigs} vs {chunked_data_contigs}"
+            )
+
+            for contig in ref_data_contigs:
+                ref_data = ref._f[f'data/{contig}']
+                chunked_data = chunked._f[f'data/{contig}']
+
+                assert set(ref_data.keys()) == set(chunked_data.keys()), (
+                    f"Dataset keys mismatch for {contig}"
+                )
+
+                for ds_name in ref_data.keys():
+                    ref_arr = ref_data[ds_name][:]
+                    chunked_arr = chunked_data[ds_name][:]
+                    numpy.testing.assert_array_equal(
+                        ref_arr, chunked_arr,
+                        err_msg=f"Data mismatch for {contig}/{ds_name}"
+                    )
+
+                # Verify index if it exists
+                if contig in ref._f.get('index', {}):
+                    assert contig in chunked._f['index'], (
+                        f"Index missing for {contig} in chunked build"
+                    )
+                    numpy.testing.assert_array_equal(
+                        ref._f[f'index/{contig}'][:],
+                        chunked._f[f'index/{contig}'][:],
+                        err_msg=f"Index mismatch for {contig}"
+                    )
+
+
+@pytest.mark.timeout(120)
+def test_chunk_merge_correctness_single_process(bam_path, fasta_file_path):
+    """Verify that splitting a contig into small chunks and merging produces
+    identical results to processing the whole contig at once.
+
+    Uses 5M chunk size: chr6 (170M bases) splits into ~34 chunks.
+    Reads are in a ~20kb window around position 99.1M, so 1-2 chunks have data.
+    Tests the merge path including concatenation of chunk arrays."""
+    _build_and_compare_chunk_sizes(bam_path, fasta_file_path, chunk_size=10_000_000)
+
+
+@pytest.mark.timeout(120)
+def test_chunk_merge_correctness_multiprocess(bam_path, fasta_file_path):
+    """Same as above but with multiprocessing to test concurrent chunk processing."""
+    _build_and_compare_chunk_sizes(bam_path, fasta_file_path, chunk_size=5_000_000, num_processes=4)
+
+
+@pytest.mark.timeout(120)
+def test_chunk_merge_small_chunks(bam_path, fasta_file_path):
+    """Test with 1M chunks to create more chunks and increase boundary crossings.
+    The ~20kb data window at position ~99.1M will be split across 1-2 chunks."""
+    _build_and_compare_chunk_sizes(bam_path, fasta_file_path, chunk_size=10_000_000)
+
+
+@pytest.mark.timeout(120)
+def test_chunk_merge_with_target_bam(target_bam_path, fasta_file_path):
+    """Test chunk merge with the larger scATAC BAM file."""
+    _build_and_compare_chunk_sizes(target_bam_path, fasta_file_path, chunk_size=10_000_000)

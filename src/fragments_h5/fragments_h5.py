@@ -141,6 +141,7 @@ import os
 import tempfile
 import multiprocessing
 import signal
+from collections import defaultdict
 from contextlib import contextmanager
 
 import h5py
@@ -162,6 +163,9 @@ methyl_keys = ['num_cpgs', 'num_converted_cpgs', 'num_cytosines', 'num_converted
 MIN_NUM_READS_FOR_INDEX = 100
 
 INDEX_BLOCK_SIZE = 5000
+
+# Size of genomic chunks for parallelization (10M bases)
+GENOMIC_CHUNK_SIZE = 10_000_000
 
 # the fragment lengths are stored as a uint16, so the max fragment length is
 # 2**16-1 == 65536-1 == 65535
@@ -706,14 +710,18 @@ class FragmentsH5:
 
 
 def build_sub_fragments_h5(args):
-    """Collect, assemble, and compress all of the fragment data for a single contig.
+    """Collect, assemble, and compress fragment data for a genomic chunk.
+
+    Each chunk is a region [chunk_start, chunk_stop) within a contig. Fragments
+    are assigned to the chunk containing their start position. When chunk_start=0
+    and chunk_stop=contig_length, this processes the entire contig (same as before).
 
     Runs inside a temporary working directory so S3/remote BAM index/cache files
     do not overlap when multiple workers run (each task gets its own CWD; cleanup on exit).
-    
+
     TODO: Pass methylation data into Fragment in fetch() or remove dead code (lines 650-673).
     """
-    input_fname, contig, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
+    input_fname, contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
 
     if single_end:
         input_to_fragments = single_end_bam_to_fragments
@@ -721,6 +729,7 @@ def build_sub_fragments_h5(args):
         input_to_fragments =  bam_to_fragments
 
     with _temporary_working_directory():
+        # For GC calculation, fetch FASTA region with buffer for fragments near chunk_stop
         fasta_file = pysam.FastaFile(fasta_filename) if fasta_filename is not None else None
 
         # initialize all of the storage arrays
@@ -737,11 +746,21 @@ def build_sub_fragments_h5(args):
 
         fragment_end_clipped_arr = numpy.zeros(0, dtype="uint8") if store_fragment_end_clipped else None
 
+        # Compute the FASTA region needed for GC calculation:
+        # fragments starting near chunk_stop can extend up to MAX_FRAG_LENGTH beyond it
+        fasta_region_start = chunk_start
+        fasta_region_stop = min(chunk_stop + MAX_FRAG_LENGTH, contig_length)
+
         # if there aren't any fragments then ff is never set. This fixes that edge case.
         ff = 0
         for fragment in input_to_fragments(
-            input_fname, chrom=contig, max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates
+            input_fname, chrom=contig, start=chunk_start, stop=chunk_stop,
+            max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates,
+            fasta_region_start=fasta_region_start, fasta_region_stop=fasta_region_stop,
         ):
+            # Only include fragments whose start position falls within this chunk
+            if fragment.start < chunk_start or fragment.start >= chunk_stop:
+                continue
             # if we have filled this chunk then resize the array
             if ff % CHUNK_SIZE == 0:
                 starts_arr.resize(starts_arr.shape[0] + CHUNK_SIZE)
@@ -817,10 +836,10 @@ def build_sub_fragments_h5(args):
 
         # if there are no fragments then there's nothing left to do
         if ff == 0:
-            return contig, None
+            return contig, chunk_start, chunk_stop, None
 
         # write the data into the h5 file (tmp_dir_name is absolute path from main process)
-        ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.h5")
+        ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.{chunk_start}.h5")
         f = h5py.File(ofname, "x")
 
         # create the h5 storing all of this data
@@ -847,7 +866,7 @@ def build_sub_fragments_h5(args):
 
         f.close()
 
-        return contig, ofname
+        return contig, chunk_start, chunk_stop, ofname
 
 
 @contextmanager
@@ -892,6 +911,7 @@ def build_fragments_h5(
     num_processes=None,
     include_duplicates=False,
     store_fragment_end_clipped=True,
+    skip_chunking=False,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -929,9 +949,10 @@ def build_fragments_h5(
     logger.info("Extracting contig lengths from bam")
     with pysam.AlignmentFile(input_fname) as bam_fp:
         bam_header_str = str(bam_fp.header)
+        all_contig_lengths = dict(zip(bam_fp.references, bam_fp.lengths))
         if allowed_contigs is None:
             allowed_contigs = bam_fp.references
-        contig_lengths_str = str(dict(zip(allowed_contigs, bam_fp.lengths)))
+        contig_lengths_str = str({c: all_contig_lengths[c] for c in allowed_contigs})
         num_mapped = {
             x.contig: x.mapped // 2
             for x in bam_fp.get_index_statistics()
@@ -942,7 +963,7 @@ def build_fragments_h5(
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
     logger.info("Loading fragments for insertion into h5")
-    
+
     # Collect results from workers BEFORE opening the output HDF5 file.
     # This avoids fork-safety issues with HDF5 (forking with open HDF5 files
     # can cause deadlocks or data corruption).
@@ -956,13 +977,23 @@ def build_fragments_h5(
             if num_mapped[contig] == 0:
                 continue
 
-            args.append((
-                input_fname, contig, fasta_filename, single_end,
-                read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir
-            ))
+            contig_len = contig_lengths[contig]
+
+            # Split contig into fixed-size genomic chunks for balanced parallelization.
+            # Small contigs (< GENOMIC_CHUNK_SIZE) remain as a single chunk.
+            # When skip_chunking is True, process each contig as a whole.
+            chunk_size = contig_len if skip_chunking else GENOMIC_CHUNK_SIZE
+            for chunk_start in range(0, contig_len, chunk_size):
+                chunk_stop = min(chunk_start + chunk_size, contig_len)
+                args.append((
+                    input_fname, contig, chunk_start, chunk_stop, contig_len,
+                    fasta_filename, single_end,
+                    read_gc, read_strand, read_methyl, set_mapq_255_to_none,
+                    include_duplicates, store_fragment_end_clipped, tmp_dir
+                ))
 
         # Total genomic bases to process, for progress tracking
-        total_bases = sum(contig_lengths[a[1]] for a in args)
+        total_bases = sum(a[3] - a[2] for a in args)  # chunk_stop - chunk_start
 
         if num_processes is not None and num_processes != 1:
             # Use 'fork' for fast startup with minimal overhead.
@@ -984,10 +1015,10 @@ def build_fragments_h5(
 
                     with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
                         for result in results_iter:
-                            contig, sub_h5_path = result
-                            pbar.update(contig_lengths[contig])
+                            contig, chunk_start, chunk_stop, sub_h5_path = result
+                            pbar.update(chunk_stop - chunk_start)
                             if sub_h5_path is not None:
-                                completed_results.append((contig, sub_h5_path))
+                                completed_results.append((contig, chunk_start, sub_h5_path))
 
             except KeyboardInterrupt:
                 logger.warning("Received interrupt signal, terminating workers...")
@@ -997,10 +1028,10 @@ def build_fragments_h5(
             # any potential hangs from the multiprocessing machinery.
             with tqdm(total=total_bases, unit="bp", desc="Extracting fragments") as pbar:
                 for arg in args:
-                    contig, sub_h5_path = build_sub_fragments_h5(arg)
-                    pbar.update(contig_lengths[contig])
+                    contig, chunk_start, chunk_stop, sub_h5_path = build_sub_fragments_h5(arg)
+                    pbar.update(chunk_stop - chunk_start)
                     if sub_h5_path is not None:
-                        completed_results.append((contig, sub_h5_path))
+                        completed_results.append((contig, chunk_start, sub_h5_path))
 
         # Check that we actually found some fragments
         if len(completed_results) == 0:
@@ -1011,11 +1042,11 @@ def build_fragments_h5(
                 f"(4) the BAM contains only unpaired/unmapped reads. "
                 f"Contigs in BAM: {list(contig_lengths.keys())[:5]}{'...' if len(contig_lengths) > 5 else ''}"
             )
-        
+
         # Now that all workers are done, open the output HDF5 file and merge results
         logger.info("Merging fragment data into output file")
         f = h5py.File(ofname, "x")
-        
+
         try:
             # create groups to store the fragments and index
             f.create_group('data')
@@ -1027,11 +1058,40 @@ def build_fragments_h5(
             f.attrs["_bam_header"] = bam_header_str
             f.attrs["_contig_lengths_str"] = contig_lengths_str
 
-            # merge all of the fragment h5s
-            for contig, sub_h5_path in completed_results:
-                with h5py.File(sub_h5_path, "r") as sub_h5:
-                    f.copy(sub_h5['data'][contig], f['data'])
-                logger.debug(f"Merged {contig}")
+            # Group chunk results by contig, sorted by chunk_start
+            chunks_by_contig = defaultdict(list)
+            for contig, chunk_start, sub_h5_path in completed_results:
+                chunks_by_contig[contig].append((chunk_start, sub_h5_path))
+            for contig in chunks_by_contig:
+                chunks_by_contig[contig].sort(key=lambda x: x[0])
+
+            # Merge chunks: concatenate arrays from all chunks per contig
+            for contig, chunks in chunks_by_contig.items():
+                if len(chunks) == 1:
+                    # Single chunk — use fast h5py copy (same as old per-contig path)
+                    _, sub_h5_path = chunks[0]
+                    with h5py.File(sub_h5_path, "r") as sub_h5:
+                        f.copy(sub_h5['data'][contig], f['data'])
+                else:
+                    # Multiple chunks — concatenate arrays in chunk order
+                    contig_grp = f.create_group(f'data/{contig}')
+                    # Read the first chunk to discover which datasets exist
+                    with h5py.File(chunks[0][1], "r") as first_h5:
+                        dataset_names = list(first_h5[f'data/{contig}'].keys())
+
+                    for ds_name in dataset_names:
+                        # Concatenate this dataset across all chunks
+                        arrays = []
+                        for _, sub_h5_path in chunks:
+                            with h5py.File(sub_h5_path, "r") as sub_h5:
+                                arrays.append(sub_h5[f'data/{contig}/{ds_name}'][:])
+                        merged = numpy.concatenate(arrays)
+                        contig_grp.create_dataset(
+                            ds_name, data=merged, dtype=merged.dtype,
+                            compression="gzip", compression_opts=4, chunks=True
+                        )
+
+                logger.debug(f"Merged {contig} ({len(chunks)} chunk(s))")
 
             logger.info("Creating index")
             # Build the index
@@ -1053,7 +1113,7 @@ def build_fragments_h5(
                 # (e.g. index_ub = INDEX[1 + search_pos//10000] could be out of bounds)
                 index_poss = numpy.append(index_poss, len(f[f"data/{contig}/starts"]))
                 f[f"index/{contig}"] = index_poss
-                
+
         finally:
             f.close()
 
