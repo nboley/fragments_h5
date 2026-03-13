@@ -885,16 +885,12 @@ def _temporary_working_directory(prefix="fragments_h5_worker_"):
 
 
 def _pool_worker_init():
-    """Initialize worker processes to ignore SIGINT and SIGTERM.
+    """Initialize worker processes to ignore SIGINT.
     
-    This allows the main process to handle Ctrl+C (SIGINT) and termination
-    requests (SIGTERM, used by Nextflow for soft timeouts) gracefully,
-    rather than having workers raise exceptions independently.
-    
-    Note: SIGKILL cannot be caught - it forcefully terminates the process.
+    This allows the main process to handle Ctrl+C (SIGINT) gracefully,
+    rather than having workers raise KeyboardInterrupt independently.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 def build_fragments_h5(
