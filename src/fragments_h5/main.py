@@ -5,13 +5,14 @@ import sys
 import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5
+from fragments_h5.fragment import is_fragment_file
 import fragments_h5._logging as logging
 
 logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(parents=[logging.build_log_parser()])
-    parser.add_argument("input_bam", help="bam file to read fragments from")
+    parser.add_argument("input_file", metavar="INPUT_FILE", help="Input BAM or bgzipped TSV/BED fragment file")
     parser.add_argument("output_frags_h5", help="where to write the new fragments h5")
 
     parser.add_argument(
@@ -65,16 +66,29 @@ def main():
         )
         sys.exit(1)
 
-    with pysam.AlignmentFile(args.input_bam) as bam:
-        if not bam.has_index():
-            if _is_remote_url(args.input_bam):
+    if not is_fragment_file(args.input_file):
+        with pysam.AlignmentFile(args.input_file) as bam:
+            if not bam.has_index():
+                if _is_remote_url(args.input_file):
+                    raise SystemExit(
+                        "Remote BAM (s3:// or http(s)://) has no index. "
+                        "build-fragments-h5 requires an indexed BAM; ensure the .bai exists "
+                        "(e.g. s3://bucket/file.bam.bai for s3://bucket/file.bam)."
+                    )
+                import subprocess
+                subprocess.run(["samtools", "index", args.input_file], check=True)
+    else:
+        try:
+            with pysam.TabixFile(args.input_file) as _tbx:
+                pass
+        except (OSError, ValueError):
+            if _is_remote_url(args.input_file):
                 raise SystemExit(
-                    "Remote BAM (s3:// or http(s)://) has no index. "
-                    "build-fragments-h5 requires an indexed BAM; ensure the .bai exists "
-                    "(e.g. s3://bucket/file.bam.bai for s3://bucket/file.bam)."
+                    "Remote TSV/BED file has no tabix index (.tbi). "
+                    "Create one with 'tabix -p bed <file>' before uploading."
                 )
             import subprocess
-            subprocess.run(f"samtools index {args.input_bam}", shell=True, check=True)
+            subprocess.run(["tabix", "-p", "bed", args.input_file], check=True)
 
     # Validate FASTA file if provided
     if args.fasta:
@@ -98,7 +112,7 @@ def main():
         num_processes = int(args.num_processes)
 
     build_fragments_h5(
-        args.input_bam,
+        args.input_file,
         args.output_frags_h5,
         fasta_filename=args.fasta,
         allowed_contigs=args.contigs,

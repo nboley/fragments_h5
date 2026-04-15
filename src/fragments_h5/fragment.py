@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import pysam
 
-from typing import Union, Optional
+from typing import Union, Optional, Iterator, List, Tuple
 
 from fragments_h5.sequence import one_hot_encode_sequences
 
@@ -593,3 +593,141 @@ def single_end_bam_to_fragments(
                 fragment_end_clipped=None,
             )
             yield frag
+
+
+def is_fragment_file(fname: str) -> bool:
+    """True if fname is a bgzipped TSV/BED fragment file (not a BAM)."""
+    return fname.endswith(".tsv.gz") or fname.endswith(".bed.gz")
+
+
+def scan_tsv_contigs(input_fname: str) -> Tuple[List[str], int]:
+    """Return (contig_names, num_columns) from a bgzipped+tabix-indexed TSV/BED file."""
+    with pysam.TabixFile(input_fname) as tbx:
+        contigs = list(tbx.contigs)
+        if not contigs:
+            raise ValueError(f"No contigs found in tabix index for {input_fname}")
+        num_columns = None
+        for line in tbx.fetch(contigs[0]):
+            if line.startswith("#"):
+                continue
+            num_columns = len(line.split("\t"))
+            break
+        if num_columns is None:
+            raise ValueError(
+                f"No data lines found in contig '{contigs[0]}' of {input_fname}"
+            )
+    return contigs, num_columns
+
+
+def tsv_to_fragments(
+    input_fname: str,
+    chrom: str,
+    start=None,
+    stop=None,
+    fasta_file=None,
+    max_tlen: int = 1000,
+    fasta_region_start=None,
+    fasta_region_stop=None,
+    **kwargs,
+) -> Iterator[Fragment]:
+    """Yield Fragment objects from a bgzipped+tabix-indexed TSV/BED file."""
+    g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
+        fasta_file, chrom,
+        region_start=fasta_region_start, region_stop=fasta_region_stop,
+    )
+
+    skipped = 0
+    total = 0
+    expected_ncols = None
+
+    with pysam.TabixFile(input_fname) as tbx:
+        if start is None and stop is None:
+            row_iter = tbx.fetch(chrom)
+        elif stop is None:
+            row_iter = tbx.fetch(chrom, start)
+        else:
+            row_iter = tbx.fetch(chrom, start, stop)
+
+        for line in row_iter:
+            if line.startswith("#"):
+                continue
+
+            parts = line.split("\t")
+            ncols = len(parts)
+            total += 1
+
+            if expected_ncols is None:
+                expected_ncols = ncols
+
+            if ncols < 3:
+                skipped += 1
+                log.warning("Skipping row with fewer than 3 columns: %r", line)
+                continue
+
+            if ncols != expected_ncols:
+                skipped += 1
+                log.warning(
+                    "Skipping row with %d columns (expected %d): %r",
+                    ncols, expected_ncols, line,
+                )
+                continue
+
+            try:
+                frag_start = int(parts[1])
+                frag_stop = int(parts[2])
+            except ValueError:
+                skipped += 1
+                log.warning("Skipping row with non-integer start/stop: %r", line)
+                continue
+
+            if frag_start < 0 or frag_stop < 0:
+                skipped += 1
+                log.warning("Skipping row with negative coordinates: %r", line)
+                continue
+
+            if frag_stop <= frag_start:
+                skipped += 1
+                log.warning("Skipping row where stop <= start: %r", line)
+                continue
+
+            if frag_stop - frag_start > max_tlen:
+                continue
+
+            cell_barcode = parts[3] if ncols >= 4 and parts[3] else None
+
+            if ncols >= 6 and parts[5] in ("+", "-"):
+                strand = parts[5]
+            else:
+                strand = None
+
+            if g_or_c_cumsum is None or frag_stop == frag_start:
+                gc = None
+            else:
+                gc = round(
+                    float(g_or_c_cumsum[frag_stop - gc_offset] - g_or_c_cumsum[frag_start - gc_offset])
+                    / float(frag_stop - frag_start),
+                    5,
+                )
+
+            yield Fragment(
+                chrom=chrom,
+                start=frag_start,
+                stop=frag_stop,
+                mapq1=None,
+                mapq2=None,
+                gc=gc,
+                strand=strand,
+                cell_barcode=cell_barcode,
+                methyl_counts=None,
+                fragment_end_clipped=None,
+            )
+
+    if total > 0 and skipped / total > 0.5:
+        raise ValueError(
+            f"More than 50% of rows skipped in {input_fname} on {chrom} "
+            f"({skipped}/{total} rows skipped)"
+        )
+    elif skipped > 0:
+        log.warning(
+            "%d/%d rows skipped in %s on %s", skipped, total, input_fname, chrom
+        )

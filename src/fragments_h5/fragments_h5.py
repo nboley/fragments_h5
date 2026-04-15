@@ -150,7 +150,10 @@ import pysam
 from tqdm import tqdm
 
 import fragments_h5._logging as logging
-from fragments_h5.fragment import bam_to_fragments, single_end_bam_to_fragments, Fragment
+from fragments_h5.fragment import (
+    bam_to_fragments, single_end_bam_to_fragments, Fragment,
+    is_fragment_file, tsv_to_fragments, scan_tsv_contigs,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -289,6 +292,7 @@ class FragmentsH5:
         self.contig_lengths = eval(self._f.attrs["_contig_lengths_str"])
         self.index_block_size = self._f.attrs["index_block_size"]
         self.max_fragment_length = self._f.attrs["max_fragment_length"]
+        self.source_format = self._f.attrs.get("_source_format", "BAM")
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
 
@@ -723,10 +727,12 @@ def build_sub_fragments_h5(args):
     """
     input_fname, contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
 
-    if single_end:
+    if is_fragment_file(input_fname):
+        input_to_fragments = tsv_to_fragments
+    elif single_end:
         input_to_fragments = single_end_bam_to_fragments
     else:
-        input_to_fragments =  bam_to_fragments
+        input_to_fragments = bam_to_fragments
 
     with _temporary_working_directory():
         # For GC calculation, fetch FASTA region with buffer for fragments near chunk_stop
@@ -943,22 +949,65 @@ def build_fragments_h5(
     # In particular, find the contigs and lengths, and save them into the h5.
     # h5s dont support dictionaries natively, so
     # we save the dictionary as a string and then use python's eval to load it.
-    assert input_fname.endswith(".bam")
+    is_tsv_input = is_fragment_file(input_fname)
 
-    logger.info("Extracting contig lengths from bam")
-    with pysam.AlignmentFile(input_fname) as bam_fp:
-        bam_header_str = str(bam_fp.header)
-        all_contig_lengths = dict(zip(bam_fp.references, bam_fp.lengths))
+    if is_tsv_input:
+        if fasta_filename is None:
+            raise ValueError("--fasta is required for TSV/BED input (needed for contig lengths and GC computation)")
+        if read_methyl:
+            raise ValueError("--read-methyl is not supported for TSV/BED input (methylation data unavailable)")
+        if single_end:
+            logger.warning("--single-end flag is meaningless for TSV/BED input; ignoring")
+        if include_duplicates:
+            logger.warning("--include-duplicates flag is meaningless for TSV/BED input (no duplicate marking); ignoring")
+        if set_mapq_255_to_none:
+            logger.warning("--set-mapq-255-to-none flag is meaningless for TSV/BED input (no MAPQ in TSV); ignoring")
+        if store_fragment_end_clipped:
+            logger.warning("fragment_end_clipped is unavailable in TSV/BED input; forcing store_fragment_end_clipped=False")
+            store_fragment_end_clipped = False
+
+        logger.info("Extracting contig names from tabix index")
+        tsv_contigs, num_columns = scan_tsv_contigs(input_fname)
+
+        if num_columns < 6 and read_strand:
+            logger.warning(
+                f"TSV/BED file has {num_columns} columns (strand requires 6 columns); forcing read_strand=False"
+            )
+            read_strand = False
+
+        bam_header_str = ""
+        with pysam.FastaFile(fasta_filename) as fasta_fp:
+            fasta_contig_lengths = dict(zip(fasta_fp.references, fasta_fp.lengths))
+
         if allowed_contigs is None:
-            allowed_contigs = bam_fp.references
-        contig_lengths_str = str({c: all_contig_lengths[c] for c in allowed_contigs})
-        num_mapped = {
-            x.contig: x.mapped // 2
-            for x in bam_fp.get_index_statistics()
-            if allowed_contigs is None or x.contig in allowed_contigs
-        }
+            allowed_contigs = tsv_contigs
 
-    contig_lengths = eval(contig_lengths_str)
+        missing_contigs = [c for c in allowed_contigs if c not in fasta_contig_lengths]
+        if missing_contigs:
+            raise ValueError(
+                f"Contigs from TSV not found in FASTA: {missing_contigs[:5]}"
+                + ("..." if len(missing_contigs) > 5 else "")
+            )
+
+        contig_lengths = {c: fasta_contig_lengths[c] for c in allowed_contigs}
+        contig_lengths_str = str(contig_lengths)
+
+    else:
+        logger.info("Extracting contig lengths from bam")
+        with pysam.AlignmentFile(input_fname) as bam_fp:
+            bam_header_str = str(bam_fp.header)
+            all_contig_lengths = dict(zip(bam_fp.references, bam_fp.lengths))
+            if allowed_contigs is None:
+                allowed_contigs = bam_fp.references
+            contig_lengths_str = str({c: all_contig_lengths[c] for c in allowed_contigs})
+            num_mapped = {
+                x.contig: x.mapped // 2
+                for x in bam_fp.get_index_statistics()
+                if allowed_contigs is None or x.contig in allowed_contigs
+            }
+
+        contig_lengths = eval(contig_lengths_str)
+
     logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
 
     logger.info("Loading fragments for insertion into h5")
@@ -972,8 +1021,8 @@ def build_fragments_h5(
         args = []
 
         for contig in contig_lengths.keys():
-            # skip contigs with zero mapped reads
-            if num_mapped[contig] == 0:
+            # skip contigs with zero mapped reads (BAM only; TSV tabix only lists contigs with data)
+            if not is_tsv_input and num_mapped[contig] == 0:
                 continue
 
             contig_len = contig_lengths[contig]
@@ -1038,10 +1087,9 @@ def build_fragments_h5(
         if len(completed_results) == 0:
             raise ValueError(
                 f"No fragments were extracted from '{input_fname}'. "
-                f"This may indicate: (1) the BAM file is empty, (2) all reads were filtered out, "
-                f"(3) contig names don't match between --contigs and the BAM header, or "
-                f"(4) the BAM contains only unpaired/unmapped reads. "
-                f"Contigs in BAM: {list(contig_lengths.keys())[:5]}{'...' if len(contig_lengths) > 5 else ''}"
+                f"This may indicate: (1) the input file is empty, (2) all reads were filtered out, "
+                f"or (3) contig names don't match between --contigs and the input file. "
+                f"Contigs processed: {list(contig_lengths.keys())[:5]}{'...' if len(contig_lengths) > 5 else ''}"
             )
 
         # Now that all workers are done, open the output HDF5 file and merge results
@@ -1057,6 +1105,7 @@ def build_fragments_h5(
             f.attrs["index_block_size"] = INDEX_BLOCK_SIZE
             f.attrs["max_fragment_length"] = MAX_FRAG_LENGTH
             f.attrs["_bam_header"] = bam_header_str
+            f.attrs["_source_format"] = "TSV" if is_tsv_input else "BAM"
             f.attrs["_contig_lengths_str"] = contig_lengths_str
 
             # Group chunk results by contig, sorted by chunk_start
@@ -1123,3 +1172,4 @@ def build_fragments_h5(
     fm_h5 = FragmentsH5(ofname, "r+")
     fm_h5._add_fragment_length_counts()
     fm_h5.close()
+       
