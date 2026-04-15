@@ -62,12 +62,10 @@ conda-login:
 	if [ -n "$$JFROG_URL" ] && { [ -n "$$JFROG_ACCESS_TOKEN" ] || [ -n "$$JFROG_USER" ]; }; then \
 		HAS_ENV_CREDS=1; \
 	fi; \
-	# Check if pip is configured with JFrog credentials
 	HAS_PIP_CREDS=0; \
 	if pip config list 2>/dev/null | grep -q "global.extra-index-url\|global.index-url" 2>/dev/null; then \
 		HAS_PIP_CREDS=1; \
 	fi; \
-	# Verify at least one method has credentials
 	if [ $$HAS_ENV_CREDS -eq 0 ] && [ $$HAS_PIP_CREDS -eq 0 ]; then \
 		echo "❌ Error: JFrog credentials not found"; \
 		echo "   Either set environment variables (JFROG_URL + JFROG_ACCESS_TOKEN/JFROG_USER)"; \
