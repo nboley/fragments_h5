@@ -9,7 +9,7 @@
 #   ./scripts/publish_conda_package.sh
 #
 # Required environment variables:
-#   ARTIFACTORY_HOST     - JFrog host (default: karius.jfrog.io)
+#   ARTIFACTORY_HOST     - JFrog host
 #   ARTIFACTORY_USER     - JFrog username
 #   ARTIFACTORY_TOKEN    - JFrog API token
 #
@@ -93,9 +93,6 @@ if [ -z "${ARTIFACTORY_USER:-}" ] || [ -z "${ARTIFACTORY_TOKEN:-}" ]; then
         ARTIFACTORY_HOST="${ARTIFACTORY_HOST:-$PARSED_HOST}"
     fi
 fi
-
-# Default ARTIFACTORY_HOST if not set
-: "${ARTIFACTORY_HOST:=karius.jfrog.io}"
 
 # Check required variables
 if [ -z "${ARTIFACTORY_USER:-}" ]; then
