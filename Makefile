@@ -2,7 +2,6 @@
 #
 # Usage:
 #   make conda-build    # Build conda package
-#   make conda-publish  # Upload conda package to JFrog
 #   make conda          # Build and upload conda package
 #   make docker-build   # Build Docker image
 #   make docker-push    # Push Docker image to GHCR
@@ -31,7 +30,6 @@ help:
 	@echo "  conda-login   Verify JFrog credentials for conda publishing"
 	@echo "  docker-login  Verify GitHub authentication for GHCR"
 	@echo "  conda-build   Build conda package with rattler-build"
-	@echo "  conda-publish Publish conda package to JFrog Artifactory"
 	@echo "  conda         Build and publish conda package"
 	@echo "  docker-build  Build Docker image"
 	@echo "  docker-push   Push Docker image to GHCR"
@@ -54,25 +52,6 @@ all: login tag conda docker clean
 	@echo "  ✓ Docker pushed: $(GHCR_IMAGE):$(VERSION)"
 	@echo "  ✓ Build artifacts cleaned"
 	@echo "========================================"
-
-conda-login:
-	@echo "Verifying JFrog credentials..."
-	@# Check if credentials are in environment variables
-	@HAS_ENV_CREDS=0; \
-	if [ -n "$$JFROG_URL" ] && { [ -n "$$JFROG_ACCESS_TOKEN" ] || [ -n "$$JFROG_USER" ]; }; then \
-		HAS_ENV_CREDS=1; \
-	fi; \
-	HAS_PIP_CREDS=0; \
-	if pip config list 2>/dev/null | grep -q "global.extra-index-url\|global.index-url" 2>/dev/null; then \
-		HAS_PIP_CREDS=1; \
-	fi; \
-	if [ $$HAS_ENV_CREDS -eq 0 ] && [ $$HAS_PIP_CREDS -eq 0 ]; then \
-		echo "❌ Error: JFrog credentials not found"; \
-		echo "   Either set environment variables (JFROG_URL + JFROG_ACCESS_TOKEN/JFROG_USER)"; \
-		echo "   Or configure pip with JFrog credentials in pip.conf"; \
-		exit 1; \
-	fi
-	@echo "✓ JFrog credentials configured"
 
 docker-login:
 	@echo "Verifying GitHub authentication..."
@@ -108,13 +87,8 @@ conda-build:
 	fi
 	@echo "Conda package built: conda-build-output/"
 
-conda-publish:
-	@echo "Publishing conda package to JFrog Artifactory..."
-	bash scripts/publish_conda_package.sh
-	@echo "Package published to karius-conda repository"
-
-conda: conda-build conda-publish
-	@echo "Conda package built and published successfully!"
+conda: conda-build
+	@echo "Conda package built successfully!"
 
 docker-build:
 	@echo "Building Docker image $(IMAGE_NAME):$(VERSION)..."
