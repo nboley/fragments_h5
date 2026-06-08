@@ -725,7 +725,7 @@ def build_sub_fragments_h5(args):
 
     TODO: Pass methylation data into Fragment in fetch() or remove dead code (lines 650-673).
     """
-    input_fname, contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
+    input_fname, bam_contig, output_contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
 
     if is_fragment_file(input_fname):
         input_to_fragments = tsv_to_fragments
@@ -759,10 +759,13 @@ def build_sub_fragments_h5(args):
 
         # if there aren't any fragments then ff is never set. This fixes that edge case.
         ff = 0
+        # Use bam_contig for reading from BAM; output_contig for FASTA lookup (when names differ)
+        fasta_chrom = output_contig if output_contig != bam_contig else None
         for fragment in input_to_fragments(
-            input_fname, chrom=contig, start=chunk_start, stop=chunk_stop,
+            input_fname, chrom=bam_contig, start=chunk_start, stop=chunk_stop,
             max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates,
             fasta_region_start=fasta_region_start, fasta_region_stop=fasta_region_stop,
+            fasta_chrom=fasta_chrom,
         ):
             # Only include fragments whose start position falls within this chunk
             if fragment.start < chunk_start or fragment.start >= chunk_stop:
@@ -842,10 +845,10 @@ def build_sub_fragments_h5(args):
 
         # if there are no fragments then there's nothing left to do
         if ff == 0:
-            return contig, chunk_start, chunk_stop, None
+            return output_contig, chunk_start, chunk_stop, None
 
         # write the data into the h5 file (tmp_dir_name is absolute path from main process)
-        ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{contig}.{chunk_start}.h5")
+        ofname = os.path.join(tmp_dir_name, f"tmp.fragment_h5.{output_contig}.{chunk_start}.h5")
         f = h5py.File(ofname, "x")
 
         # create the h5 storing all of this data
@@ -855,24 +858,24 @@ def build_sub_fragments_h5(args):
                 compression="gzip", compression_opts=4, chunks=True
             )
 
-        mk_dataset(f"data/{contig}/starts", data=starts_arr, dtype="int32")
+        mk_dataset(f"data/{output_contig}/starts", data=starts_arr, dtype="int32")
         assert MAX_FRAG_LENGTH <= 2 ** 16 - 1
 
-        mk_dataset(f"data/{contig}/lengths", lengths_arr, "uint16")
-        mk_dataset(f"data/{contig}/mapq", mapq_arr, "uint8")
+        mk_dataset(f"data/{output_contig}/lengths", lengths_arr, "uint16")
+        mk_dataset(f"data/{output_contig}/mapq", mapq_arr, "uint8")
         if read_gc:
-            mk_dataset(f"data/{contig}/gc", gc_arr, "uint8")
+            mk_dataset(f"data/{output_contig}/gc", gc_arr, "uint8")
         if read_strand:
-            mk_dataset(f"data/{contig}/strand", strand_arr, "|S1")
+            mk_dataset(f"data/{output_contig}/strand", strand_arr, "|S1")
         if read_methyl:
             for key, val in methyl_arrays.items():
-                mk_dataset(f"data/{contig}/{key}", val, "uint8")
+                mk_dataset(f"data/{output_contig}/{key}", val, "uint8")
         if store_fragment_end_clipped:
-            mk_dataset(f"data/{contig}/fragment_end_clipped", fragment_end_clipped_arr, "uint8")
+            mk_dataset(f"data/{output_contig}/fragment_end_clipped", fragment_end_clipped_arr, "uint8")
 
         f.close()
 
-        return contig, chunk_start, chunk_stop, ofname
+        return output_contig, chunk_start, chunk_stop, ofname
 
 
 @contextmanager
@@ -914,6 +917,7 @@ def build_fragments_h5(
     include_duplicates=False,
     store_fragment_end_clipped=True,
     skip_chunking=False,
+    contig_name_map=None,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -1008,7 +1012,20 @@ def build_fragments_h5(
 
         contig_lengths = eval(contig_lengths_str)
 
-    logger.debug(f"Processing contigs: '{contig_lengths.keys()}'")
+    # Build bam_contig -> output_contig mapping
+    # contig_name_map maps BAM names to output names; unmapped contigs keep their BAM name
+    if contig_name_map is None:
+        contig_name_map = {}
+    _map_name = lambda c: contig_name_map.get(c, c)
+
+    # Rebuild contig_lengths with output names for the H5
+    contig_lengths_output = {_map_name(c): length for c, length in contig_lengths.items()}
+    contig_lengths_str = str(contig_lengths_output)
+    if contig_name_map:
+        logger.info(f"Contig name mapping applied: {len(contig_name_map)} entries "
+                     f"(e.g. {list(contig_name_map.items())[:3]})")
+
+    logger.debug(f"Processing contigs: '{contig_lengths_output.keys()}'")
 
     logger.info("Loading fragments for insertion into h5")
 
@@ -1020,12 +1037,13 @@ def build_fragments_h5(
     with tempfile.TemporaryDirectory() as tmp_dir:
         args = []
 
-        for contig in contig_lengths.keys():
+        for bam_contig in contig_lengths.keys():
             # skip contigs with zero mapped reads (BAM only; TSV tabix only lists contigs with data)
-            if not is_tsv_input and num_mapped[contig] == 0:
+            if not is_tsv_input and num_mapped[bam_contig] == 0:
                 continue
 
-            contig_len = contig_lengths[contig]
+            output_contig = _map_name(bam_contig)
+            contig_len = contig_lengths[bam_contig]
 
             # Split contig into fixed-size genomic chunks for balanced parallelization.
             # Small contigs (< GENOMIC_CHUNK_SIZE) remain as a single chunk.
@@ -1034,7 +1052,8 @@ def build_fragments_h5(
             for chunk_start in range(0, contig_len, chunk_size):
                 chunk_stop = min(chunk_start + chunk_size, contig_len)
                 args.append((
-                    input_fname, contig, chunk_start, chunk_stop, contig_len,
+                    input_fname, bam_contig, output_contig,
+                    chunk_start, chunk_stop, contig_len,
                     fasta_filename, single_end,
                     read_gc, read_strand, read_methyl, set_mapq_255_to_none,
                     include_duplicates, store_fragment_end_clipped, tmp_dir

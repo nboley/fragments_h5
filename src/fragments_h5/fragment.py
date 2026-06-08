@@ -452,6 +452,7 @@ def bam_to_fragments(
     include_duplicates=False,
     fasta_region_start=None,
     fasta_region_stop=None,
+    fasta_chrom=None,
 ):
     if isinstance(alignment_file, str):
         alignment_file = pysam.AlignmentFile(alignment_file)
@@ -460,7 +461,7 @@ def bam_to_fragments(
         close_alignment_file = False
 
     g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
-        fasta_file, chrom,
+        fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
         region_start=fasta_region_start, region_stop=fasta_region_stop
     )
 
@@ -555,8 +556,12 @@ def single_end_bam_to_fragments(
         include_duplicates=False,
         fasta_region_start=None,
         fasta_region_stop=None,
+        fasta_chrom=None,
     ):
-    assert fasta_file is None
+    g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
+        fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
+        region_start=fasta_region_start, region_stop=fasta_region_stop
+    )
 
     with pysam.AlignmentFile(alignment_file) as af:
         if chrom is None:
@@ -573,6 +578,14 @@ def single_end_bam_to_fragments(
                 or align.mapq < min_mapq
             ): continue
 
+            frag_start = align.pos
+            frag_stop = align.aend
+
+            if g_or_c_cumsum is None or frag_stop == frag_start:
+                gc = None
+            else:
+                gc = round(float(g_or_c_cumsum[frag_stop - gc_offset] - g_or_c_cumsum[frag_start - gc_offset])/float(frag_stop - frag_start), 5)
+
             if align.is_forward:
                 strand = "+"
             elif align.is_reverse:
@@ -582,11 +595,11 @@ def single_end_bam_to_fragments(
 
             frag = Fragment(
                 align.reference_name,
-                align.pos,
-                align.aend,
+                frag_start,
+                frag_stop,
                 mapq1=align.mapq,
                 mapq2=None,
-                gc=None,
+                gc=gc,
                 strand=strand,
                 cell_barcode=None,
                 methyl_counts=None,
@@ -628,11 +641,12 @@ def tsv_to_fragments(
     max_tlen: int = 1000,
     fasta_region_start=None,
     fasta_region_stop=None,
+    fasta_chrom=None,
     **kwargs,
 ) -> Iterator[Fragment]:
     """Yield Fragment objects from a bgzipped+tabix-indexed TSV/BED file."""
     g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
-        fasta_file, chrom,
+        fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
         region_start=fasta_region_start, region_stop=fasta_region_stop,
     )
 

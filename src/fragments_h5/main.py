@@ -21,6 +21,11 @@ def parse_args():
     parser.add_argument(
         "--contigs", default=None, nargs="+", help="Restrict building the fragment h5 over these contigs.",
     )
+    parser.add_argument(
+        "--contig-name-map", default=None,
+        help="TSV file mapping input contig names to output names (two columns: input_name, output_name). "
+             "Contigs not in the map are kept as-is. FASTA contig names must match the OUTPUT names.",
+    )
 
     parser.add_argument("--set-mapq-255-to-none", action="store_true", help="set mapqs of 255 to None")
     parser.add_argument("--exclude-strand", default=False, action="store_true", help="Exclude strand info")
@@ -111,6 +116,22 @@ def main():
     else:
         num_processes = int(args.num_processes)
 
+    # Parse contig name map if provided
+    contig_name_map = None
+    if args.contig_name_map:
+        contig_name_map = {}
+        with open(args.contig_name_map) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) != 2:
+                    raise SystemExit(
+                        f"Invalid contig name map line (expected 2 tab-separated columns): {line!r}"
+                    )
+                contig_name_map[parts[0]] = parts[1]
+
     build_fragments_h5(
         args.input_file,
         args.output_frags_h5,
@@ -124,6 +145,7 @@ def main():
         include_duplicates=args.include_duplicates,
         store_fragment_end_clipped=args.store_fragment_end_clipped,
         skip_chunking=args.skip_chunking,
+        contig_name_map=contig_name_map,
     )
 
 
