@@ -21,37 +21,6 @@ rattler-build build \
     --variant-config conda-recipe/variant_config.yaml
 ```
 
-## Publishing to JFrog Artifactory
-
-To build and publish the conda package to JFrog Artifactory:
-
-```bash
-# Set required environment variables
-export ARTIFACTORY_HOST="karius.jfrog.io"
-export ARTIFACTORY_USER="your-username"
-export ARTIFACTORY_TOKEN="your-api-token"
-
-# Build and publish
-make conda
-```
-
-Or run separately:
-
-```bash
-make conda-build     # Build only
-make conda-publish   # Publish only
-```
-
-Install from Artifactory:
-
-```bash
-conda install -c https://karius.jfrog.io/artifactory/api/conda/karius-conda fragments-h5
-```
-
-See [CONDA_PUBLISHING.md](../CONDA_PUBLISHING.md) for detailed publishing documentation.
-
-See `RATTLER_BUILD_MIGRATION.md` in the repository root for more details on the build system.
-
 ## Building the Docker image
 
 From the repository root, build the image (version is read from `pyproject.toml`):
