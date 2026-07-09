@@ -153,6 +153,7 @@ import fragments_h5._logging as logging
 from fragments_h5.fragment import (
     bam_to_fragments, single_end_bam_to_fragments, Fragment,
     is_fragment_file, tsv_to_fragments, scan_tsv_contigs,
+    DEFAULT_MIN_MAPQ,
 )
 
 
@@ -339,6 +340,12 @@ class FragmentsH5:
             ("strand" in self.data[contig])
             and (len(self.data[contig]["strand"].shape) == 1)
             for contig in self.data.keys()
+        )
+
+    @property
+    def has_gc(self):
+        return any(
+            "gc" in self.data[contig] for contig in self.data.keys()
         )
 
     @property
@@ -725,7 +732,7 @@ def build_sub_fragments_h5(args):
 
     TODO: Pass methylation data into Fragment in fetch() or remove dead code (lines 650-673).
     """
-    input_fname, bam_contig, output_contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name = args
+    input_fname, bam_contig, output_contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, se_max_fragment_length, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name, min_mapq = args
 
     if is_fragment_file(input_fname):
         input_to_fragments = tsv_to_fragments
@@ -761,14 +768,18 @@ def build_sub_fragments_h5(args):
         ff = 0
         # Use bam_contig for reading from BAM; output_contig for FASTA lookup (when names differ)
         fasta_chrom = output_contig if output_contig != bam_contig else None
+        _min_mapq = min_mapq if min_mapq is not None else DEFAULT_MIN_MAPQ
         for fragment in input_to_fragments(
             input_fname, chrom=bam_contig, start=chunk_start, stop=chunk_stop,
             max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates,
             fasta_region_start=fasta_region_start, fasta_region_stop=fasta_region_stop,
-            fasta_chrom=fasta_chrom,
+            fasta_chrom=fasta_chrom, min_mapq=_min_mapq,
         ):
             # Only include fragments whose start position falls within this chunk
             if fragment.start < chunk_start or fragment.start >= chunk_stop:
+                continue
+            # In SE mode, filter out fragments longer than the max
+            if se_max_fragment_length is not None and (fragment.stop - fragment.start) > se_max_fragment_length:
                 continue
             # if we have filled this chunk then resize the array
             if ff % CHUNK_SIZE == 0:
@@ -913,11 +924,13 @@ def build_fragments_h5(
     read_methyl=False,
     # treat the bam as single ended reads
     single_end=False,
+    se_max_fragment_length=None,
     num_processes=None,
     include_duplicates=False,
     store_fragment_end_clipped=True,
     skip_chunking=False,
     contig_name_map=None,
+    min_mapq=None,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -1054,13 +1067,14 @@ def build_fragments_h5(
                 args.append((
                     input_fname, bam_contig, output_contig,
                     chunk_start, chunk_stop, contig_len,
-                    fasta_filename, single_end,
+                    fasta_filename, single_end, se_max_fragment_length,
                     read_gc, read_strand, read_methyl, set_mapq_255_to_none,
-                    include_duplicates, store_fragment_end_clipped, tmp_dir
+                    include_duplicates, store_fragment_end_clipped, tmp_dir,
+                    min_mapq,
                 ))
 
         # Total genomic bases to process, for progress tracking
-        total_bases = sum(a[3] - a[2] for a in args)  # chunk_stop - chunk_start
+        total_bases = sum(a[4] - a[3] for a in args)  # chunk_stop - chunk_start
 
         if num_processes is not None and num_processes != 1:
             # Use 'fork' for fast startup with minimal overhead.
@@ -1168,13 +1182,13 @@ def build_fragments_h5(
             for contig in f["data"]:
                 # skip contigs that are shorter than the index block length
                 # the indexing doesn't do anything if we're always still reading the full contig
-                if contig_lengths[contig] <= INDEX_BLOCK_SIZE:
+                if contig_lengths_output[contig] <= INDEX_BLOCK_SIZE:
                     continue
                 # skip contigs with too few reads.
                 if len(f[f"data/{contig}/starts"]) < MIN_NUM_READS_FOR_INDEX:
                     continue
 
-                block_indices = numpy.array(list(range(0, contig_lengths[contig], INDEX_BLOCK_SIZE)))
+                block_indices = numpy.array(list(range(0, contig_lengths_output[contig], INDEX_BLOCK_SIZE)))
                 index_poss = numpy.searchsorted(
                     f[f"data/{contig}/starts"][:], block_indices, side="left"
                 )
