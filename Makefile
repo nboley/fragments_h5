@@ -112,6 +112,20 @@ docker: docker-build docker-push
 	@echo "Docker image built and pushed successfully!"
 
 tag:
+	@# VERSION is read from the WORKING TREE. If pyproject.toml is uncommitted,
+	@# the tag would point at HEAD, which declares a different version. This is
+	@# how v2.10.1 came to point at a commit whose pyproject.toml said 2.10.0.
+	@if ! git diff --quiet HEAD -- pyproject.toml; then \
+		echo "Error: pyproject.toml has uncommitted changes; refusing to tag."; \
+		echo "  Working tree declares $(VERSION), but the tag would point at HEAD,"; \
+		echo "  which declares something else. Commit the version bump first."; \
+		exit 1; \
+	fi
+	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
+		echo "Error: Tag v$(VERSION) already exists"; \
+		echo "  Bump the version in pyproject.toml first."; \
+		exit 1; \
+	fi
 	@echo "Creating git tag v$(VERSION)..."
 	git tag -a v$(VERSION) -m "Release v$(VERSION)"
 	@echo "Pushing tag to origin..."
