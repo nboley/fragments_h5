@@ -12,7 +12,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Build
 echo "Building conda package with rattler-build..."
-VERSION=$(grep '^version' "$PROJECT_ROOT/pyproject.toml" | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+VERSION=$(grep '^version' "$PROJECT_ROOT/pyproject.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 rattler-build build \
     --recipe "$PROJECT_ROOT/conda-recipe/recipe.yaml" \
     --output-dir "$PROJECT_ROOT/conda-build-output" \

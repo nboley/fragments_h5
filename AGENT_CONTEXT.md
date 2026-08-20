@@ -681,10 +681,10 @@ process build_fragments_h5 {
 version = "2.7.1"
 ```
 
-**Sync Requirements:**
-- `pyproject.toml` version
-- `conda-recipe/recipe.yaml` version
-- Git tag (`v2.7.1`)
+**Version source:** `pyproject.toml` only. The conda recipe carries no version
+literal — it receives one at build time via `--variant pkg_version=$(VERSION)`,
+and the Makefile derives `VERSION` from `pyproject.toml`. The git tag is the one
+remaining value that must be set to match.
 
 ### 10.2 Release Workflow
 
@@ -919,8 +919,7 @@ pytest tests/test_fragments_h5.py::test_new_feature -v
 
 ### 13.3 Pre-Release Checklist
 
-- [ ] Update version in `pyproject.toml`
-- [ ] Update version in `conda-recipe/recipe.yaml`
+- [ ] Update version in `pyproject.toml` (the only place it is declared)
 - [ ] Update `RELEASE.md` if needed
 - [ ] Run full test suite: `pytest tests/`
 - [ ] Test conda build: `make conda-build`
