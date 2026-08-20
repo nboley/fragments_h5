@@ -77,7 +77,8 @@ conda-build:
 		--output-dir conda-build-output \
 		--channel conda-forge \
 		--channel bioconda \
-		--variant-config conda-recipe/variant_config.yaml; \
+		--variant-config conda-recipe/variant_config.yaml \
+		--variant pkg_version=$(VERSION); \
 	BUILD_EXIT=$$?; \
 	if [ $$BUILD_EXIT -ne 0 ] && { [ ! -d conda-build-output ] || [ -z "$$(find conda-build-output -name '*.conda' 2>/dev/null)" ]; }; then \
 		echo "❌ Error: Conda build failed (exit code $$BUILD_EXIT)"; \
