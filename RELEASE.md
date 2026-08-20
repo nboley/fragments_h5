@@ -130,5 +130,5 @@ docker run --rm ghcr.io/nboley/fragments-h5:2.7.0 build-fragments-h5 --help
 ## Troubleshooting
 
 - **Docker push fails**: Ensure `gh auth login` is completed
-- **Version mismatch**: Check that `pyproject.toml` and `conda-recipe/recipe.yaml` both have the same version
+- **Version mismatch**: Not possible by construction — `pyproject.toml` is the only place the version is declared. The conda recipe receives it at build time via `--variant pkg_version=$(VERSION)`.
 - **Conda build fails**: Ensure conda-forge and bioconda channels are available

@@ -193,7 +193,7 @@ for artifact in "${ARTIFACTS[@]}"; do
             ;;
         409)
             log_warn "  ⚠ Package already exists in Artifactory (HTTP 409)"
-            log_warn "    Bump version in recipe.yaml to publish a new version"
+            log_warn "    Bump version in pyproject.toml to publish a new version"
             UPLOAD_SKIPPED=$((UPLOAD_SKIPPED + 1))
             ;;
         *)
