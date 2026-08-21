@@ -200,18 +200,22 @@ usage: build-fragments-h5 [-h] [--quiet | --verbose | --debug]
                           [--log-format LOG_FORMAT]
                           [--log-filename LOG_FILENAME]
                           [--log-file-verbosity-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}]
-                          [--log-file-format LOG_FILE_FORMAT]
-                          [--fasta FASTA] [--contigs CONTIGS [CONTIGS ...]]
+                          [--log-file-format LOG_FILE_FORMAT] [--fasta FASTA]
+                          [--contigs CONTIGS [CONTIGS ...]]
+                          [--contig-name-map CONTIG_NAME_MAP]
                           [--set-mapq-255-to-none] [--exclude-strand]
                           [--read-methyl] [--single-end]
+                          [--se-max-fragment-length SE_MAX_FRAGMENT_LENGTH]
+                          [--min-mapq MIN_MAPQ] [--include-duplicates]
                           [--num-processes NUM_PROCESSES]
-                          input_bam output_frags_h5
+                          [--no-store-fragment-end-clipped] [--skip-chunking]
+                          INPUT_FILE output_frags_h5
 
 positional arguments:
-  input_bam             bam file to read fragments from
+  INPUT_FILE            Input BAM or bgzipped TSV/BED fragment file
   output_frags_h5       where to write the new fragments h5
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --quiet, -q           Only output error log messages (and above) to the
                         output stream.
@@ -220,24 +224,36 @@ optional arguments:
   --debug               Output debug level log messages (and above) to the
                         output stream.
   --fasta FASTA         Path to a fasta file containing the reference genome.
-                        Supports local paths and S3 URLs (s3://bucket/file.fa.gz).
-                        For S3 FASTA files, the index file (.fai) must exist at
-                        the same S3 path. For compressed FASTA (.fa.gz), the .gzi
-                        index is also required. Requires pysam/htslib built with
-                        S3 support (libcurl) and AWS credentials for non-public buckets.
   --contigs CONTIGS [CONTIGS ...]
                         Restrict building the fragment h5 over these contigs.
+  --contig-name-map CONTIG_NAME_MAP
+                        TSV file mapping input contig names to output names
+                        (two columns: input_name, output_name). Contigs not in
+                        the map are kept as-is. FASTA contig names must match
+                        the OUTPUT names.
   --set-mapq-255-to-none
                         set mapqs of 255 to None
   --exclude-strand      Exclude strand info
   --read-methyl         Parse cpg's and converted cpg's from YM tag
   --single-end          Sequencing is single ended (useful for long read
                         technologies)
-  --no-store-fragment-end-clipped
-                        Do not store the fragment_end_clipped flag (default: store it)
+  --se-max-fragment-length SE_MAX_FRAGMENT_LENGTH
+                        Maximum fragment length to include in single-end mode
+                        (required with --single-end for BAM input). Fragments
+                        longer than this are excluded. Must be between 1 and
+                        65535.
+  --min-mapq MIN_MAPQ   Minimum mapping quality to include a fragment
+                        (default: 0, i.e. keep all). Must be >= 0.
+  --include-duplicates  Include duplicate-marked fragments in the output
+                        (default: exclude duplicates)
   --num-processes NUM_PROCESSES
                         Num of processes to use (defaults to 1 -- use 'all'
                         for all cores)
+  --no-store-fragment-end-clipped
+                        Do not store fragment_end_clipped flag (default: store
+                        it)
+  --skip-chunking       Disable chunk-based parallelization and process each
+                        contig as a whole
 
 logging:
   --log-format LOG_FORMAT

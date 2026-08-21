@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
-**Last Updated:** 2026-03-09
-**Version:** 2.8.0
+**Last Updated:** 2026-08-21
+**Version:** 2.11.0
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -30,7 +30,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.8.0
+- **Version:** 2.11.0
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
@@ -91,7 +91,7 @@ Optimization: Use block index to reduce searchsorted range
 
 ### 2.3 Multiprocessing Architecture
 
-**Build Pipeline (v2.8.0 — Chunk-Based Parallelization):**
+**Build Pipeline (Chunk-Based Parallelization, since v2.8.0):**
 1. **Fork:** Uses `fork` start method for minimal overhead (safe because output HDF5 opened after workers complete)
 2. **Per-Worker Temp Dirs:** Each worker gets isolated temp directory for S3 index caching
 3. **Chunk-Based Workers:** Each contig is split into fixed-size genomic chunks (GENOMIC_CHUNK_SIZE = 10M bases). Each chunk is a work unit processed independently. Fragments are assigned to the chunk containing their start position. Workers fetch only the relevant BAM/FASTA region (with MAX_FRAGMENT_LENGTH buffer for GC).
@@ -152,7 +152,7 @@ fragments_h5/
 │   ├── variant_config.yaml
 │   └── conda_build_config.yaml
 ├── docs/
-│   └── plan_s3_multiprocess_worker_cwd.md
+│   └── plan_chunk_based_parallelization.md
 ├── pyproject.toml              # pip package metadata
 ├── setup.py                    # Cython extension build
 ├── Makefile                    # Build/release automation
@@ -193,12 +193,13 @@ class FragmentsH5:
 
 **Build Functions:**
 ```python
-def build_fragments_h5(bam_fname, output_fname, fasta_filename=None,
+def build_fragments_h5(input_fname, ofname, fasta_filename=None,
                       allowed_contigs=None, set_mapq_255_to_none=False,
                       read_strand=True, read_methyl=False, single_end=False,
-                      num_processes=1, include_duplicates=False,
-                      store_fragment_end_clipped=True, skip_chunking=False):
-    """Main entry point for building fragment H5 from BAM"""
+                      se_max_fragment_length=None, num_processes=None,
+                      include_duplicates=False, store_fragment_end_clipped=True,
+                      skip_chunking=False, contig_name_map=None, min_mapq=None):
+    """Main entry point for building fragment H5 from BAM or TSV/BED"""
 
 def build_sub_fragments_h5(args):
     """Worker function — processes one chunk (contig, chunk_start, chunk_stop)"""
@@ -267,6 +268,9 @@ def one_hot_encode_sequences(sequences: list[str]) -> np.ndarray:
   - `--exclude-strand`: Don't store strand info
   - `--read-methyl`: Parse methylation from YM tag
   - `--single-end`: Single-end sequencing mode
+  - `--se-max-fragment-length`: Max fragment length for single-end mode (required with `--single-end` for BAM input, range 1–65535)
+  - `--min-mapq`: Minimum mapping quality filter (default: 0 = keep all, must be >= 0)
+  - `--contig-name-map`: TSV file mapping input contig names to output names
   - `--include-duplicates`: Include duplicate-marked reads (default: exclude)
   - `--no-store-fragment-end-clipped`: Don't store clipping info
   - `--num-processes`: Number of workers (default: 1, use 'all' for all cores)
@@ -275,6 +279,9 @@ def one_hot_encode_sequences(sequences: list[str]) -> np.ndarray:
 
 **Validation:**
 - Checks if output file already exists (fails early with error)
+- Range validation: `--se-max-fragment-length` must be 1–65535; `--min-mapq` must be >= 0
+- For BAM input: `--se-max-fragment-length` required with `--single-end`, rejected without it
+- For TSV/BED input: `--single-end`, `--se-max-fragment-length`, and `--min-mapq` are warned about and neutralized (these flags are BAM-only)
 - Checks BAM index exists (runs `samtools index` if local, fails if remote)
 - Validates FASTA accessibility for S3 URLs (requires `.fai`, `.gzi` for compressed)
 
@@ -353,7 +360,7 @@ make docker-push
 make docker
 ```
 
-**Image:** `ghcr.io/nboley/fragments-h5:2.7.1` and `:latest`
+**Image:** `ghcr.io/nboley/fragments-h5:2.11.0` and `:latest`
 
 **Dockerfile Highlights:**
 - Base: Python 3.10+
@@ -450,7 +457,7 @@ make docker
 
 **Challenge:** pysam downloads S3 indexes to local temp files, causing conflicts when multiple processes access the same S3 URL.
 
-**Solution:** Per-worker temporary working directories (`docs/plan_s3_multiprocess_worker_cwd.md`)
+**Solution:** Per-worker temporary working directories (`docs/plan_chunk_based_parallelization.md`)
 
 ```python
 @contextmanager
@@ -613,10 +620,12 @@ build_fragments_h5(
     set_mapq_255_to_none=False,
     read_strand=True,
     read_methyl=False,
-    single_end=False,
+    single_end=True,
+    se_max_fragment_length=120,
     num_processes=8,
     include_duplicates=False,
-    store_fragment_end_clipped=True
+    store_fragment_end_clipped=True,
+    min_mapq=30,
 )
 ```
 
@@ -634,7 +643,7 @@ build_fragments_h5(
 **Nextflow Process Example:**
 ```groovy
 process build_fragments_h5 {
-    container "ghcr.io/nboley/fragments-h5:2.7.1"
+    container "ghcr.io/nboley/fragments-h5:2.11.0"
     
     input:
     tuple val(sample_id), path(bam), path(bai), 
@@ -840,7 +849,7 @@ build-fragments-h5 input.bam output.h5 --num-processes all \
 **Issue: Multiprocess S3 conflicts**
 - **Cause:** Workers sharing S3 index temp files
 - **Status:** Fixed via per-worker temp dirs
-- **Check:** `docs/plan_s3_multiprocess_worker_cwd.md`
+- **Check:** `docs/plan_chunk_based_parallelization.md`
 
 **Issue: ImportError for `fragments_h5.sequence`**
 - **Cause:** Cython extension not compiled
@@ -1033,7 +1042,7 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 
 **Test Coverage Gaps:**
 - MethylCounts and YM tag parsing (fragment.py)
-- Single-end BAM processing (single_end_bam_to_fragments)
+- Single-end BAM processing end-to-end (basic SE filter gating is now tested)
 
 ### 16.2 Potential Improvements
 
@@ -1045,7 +1054,7 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 **Features:**
 - Support CSI indexes (in addition to BAI)
 - Support alternative methylation tag formats
-- Add fragment filtering during build (e.g., min/max length)
+- Provenance attributes: record build-time filter parameters (min_mapq, se_max_fragment_length) in h5 metadata (design pending)
 
 **Usability:**
 - Validate FASTA/BAM compatibility (contig names)
@@ -1066,6 +1075,14 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 
 ---
 
+### v2.11.0 Changelog
+- **`--se-max-fragment-length` CLI flag:** Maximum fragment length filter for single-end mode. Required with `--single-end` for BAM input. Range: 1–65535 (uint16 `lengths_arr` limit). Fragments with alignment span exceeding this value are excluded.
+- **`--min-mapq` CLI flag:** Minimum mapping quality filter. Fragments below this threshold are excluded at build time. Default: 0 (no filtering). Range: >= 0.
+- **TSV/BED input safety:** `--single-end`, `--se-max-fragment-length`, and `--min-mapq` are each individually warned about and neutralized when input is TSV/BED, since these flags are BAM-only concepts.
+- **CLI validation:** Range checks for both new flags; `--se-max-fragment-length` requires `--single-end` and vice versa (BAM only).
+- **Test coverage:** First CLI-level tests in this repo; SE filter gate at `fragments_h5.py:782` now has mutation-verified test coverage.
+- **Pre-existing fix:** `--read-methyl` help text corrected from "YN tag" to "YM tag" (code always read "YM").
+
 ### v2.8.0 Changelog
 - **Chunk-based parallelization:** Contigs split into 10M-base chunks for balanced multiprocessing load. Eliminates bottleneck where large contigs (e.g., chr1 ~249M) serialize work.
 - **Float64 GC cumsum:** GC content cumulative sum uses float64 instead of float32, fixing precision loss on large chromosomes.
@@ -1073,6 +1090,6 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 - **Single-process optimization:** When num_processes=1, work runs in-process without forking.
 - **Bug fix:** `contig_lengths` computation with `--contigs` filter was pairing contig names with wrong lengths.
 
-**Document Version:** 1.2
-**Last Updated:** 2026-03-09
+**Document Version:** 1.3
+**Last Updated:** 2026-08-21
 **Generated for:** Debugging and development assistance
