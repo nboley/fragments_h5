@@ -140,6 +140,15 @@ def fasta_file_path():
     return os.path.join(DATA_DIR, "GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
 
 
+@pytest.fixture(scope="module")
+def bam_path():
+    """Real BAM fixture (also used by tests/test_fragments_h5.py). The :782 gate
+    is only reachable with BAM input: TSV input always neutralizes single_end and
+    se_max_fragment_length before the gate is ever consulted (see
+    TestTsvNeutralization)."""
+    return os.path.join(DATA_DIR, "small.chr6.bam")
+
+
 class TestTsvNeutralization:
     """Test that build_fragments_h5 warns and neutralizes BAM-only flags for TSV input."""
 
@@ -167,7 +176,17 @@ class TestTsvNeutralization:
                 assert fh5.n_fragments == 3
 
     def test_min_mapq_neutralized_for_tsv(self, tsv_fragment_file, fasta_file_path, caplog):
-        """--min-mapq should be warned and neutralized for TSV input."""
+        """--min-mapq should be warned and neutralized for TSV input.
+
+        Note: the n_fragments == 3 assertion below cannot fail regardless of
+        neutralization. tsv_to_fragments accepts **kwargs and never reads
+        min_mapq, so TSV input is structurally incapable of MAPQ filtering
+        whether or not the neutralizer runs — it's a baseline sanity check
+        (the build still produces output), not evidence of neutralization.
+        The caplog warning assertion below is the only part of this test with
+        teeth: it is the sole check that the neutralizer's warning path
+        actually fires.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "out.h5")
             with caplog.at_level(logging.WARNING, logger="fragments_h5.fragments_h5"):
@@ -197,20 +216,20 @@ class TestTsvNeutralization:
             with FragmentsH5(output) as fh5:
                 assert fh5.n_fragments == 3
 
-
-# ── SE filter gating ──
-
-class TestSeFilterGating:
-    """Verify the SE length filter at build_sub_fragments_h5 is gated on single_end."""
-
-    def test_se_filter_not_applied_when_not_single_end(self, tsv_fragment_file, fasta_file_path):
-        """Even if se_max_fragment_length leaks through somehow, the filter
-        should not apply unless single_end is True. The TSV neutralization
-        already sets single_end=False, so this is a defense-in-depth test."""
+    def test_single_end_and_length_neutralized_together_for_tsv(
+        self, tsv_fragment_file, fasta_file_path
+    ):
+        """This is a duplicate of test_single_end_neutralized_for_tsv with a more
+        extreme se_max_fragment_length value (1 instead of 50). It exercises TSV
+        NEUTRALIZATION, not the :782 gate: for TSV input the neutralizer sets
+        single_end=False and se_max_fragment_length=None before the gate is ever
+        consulted, so this test would pass even if the :782 gate were deleted
+        entirely. Renamed from the former (misleadingly named)
+        TestSeFilterGating.test_se_filter_not_applied_when_not_single_end, which
+        claimed to test the gate but actually only exercised this same
+        neutralization path. See TestSeFilterGating below for real gate tests."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "out.h5")
-            # Call with single_end=True + tiny se_max_fragment_length on TSV.
-            # The library neutralizes these for TSV, so all fragments survive.
             build_fragments_h5(
                 tsv_fragment_file,
                 output,
@@ -221,6 +240,77 @@ class TestSeFilterGating:
             )
             with FragmentsH5(output) as fh5:
                 assert fh5.n_fragments == 3
+
+
+# ── SE filter gating (BAM input only — see bam_path fixture) ──
+
+class TestSeFilterGating:
+    """Verify the :782 gate in build_sub_fragments_h5:
+
+        if single_end and se_max_fragment_length is not None and (fragment.stop - fragment.start) > se_max_fragment_length:
+
+    actually requires single_end=True before applying the SE length filter.
+    This is only testable with BAM input: for TSV input the neutralizer in
+    build_fragments_h5 always clears single_end and se_max_fragment_length
+    before the gate is reached (see TestTsvNeutralization), so a TSV-based test
+    can never exercise this line. Prior to this test class the gate had zero
+    test coverage and could be deleted with no test failures.
+    """
+
+    def test_gate_blocks_filter_when_not_single_end(self, bam_path, fasta_file_path):
+        """single_end=False + se_max_fragment_length=1 must NOT filter anything.
+
+        Every real fragment in the BAM fixture is far longer than 1bp, so if the
+        `single_end and` conjunct were removed from the :782 gate, the length
+        filter would apply regardless of single_end and n_fragments would
+        collapse to 0. Detects: deleting `single_end and` from the :782 gate.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline = os.path.join(tmpdir, "baseline.h5")
+            build_fragments_h5(
+                bam_path, baseline, fasta_filename=fasta_file_path, num_processes=1,
+            )
+            with FragmentsH5(baseline) as fh5:
+                baseline_count = fh5.n_fragments
+            assert baseline_count > 0, "test BAM should have at least one fragment"
+
+            output = os.path.join(tmpdir, "out.h5")
+            build_fragments_h5(
+                bam_path,
+                output,
+                fasta_filename=fasta_file_path,
+                single_end=False,
+                se_max_fragment_length=1,
+                num_processes=1,
+            )
+            with FragmentsH5(output) as fh5:
+                assert fh5.n_fragments == baseline_count
+
+    def test_gate_applies_filter_when_single_end(self, bam_path, fasta_file_path):
+        """single_end=True + se_max_fragment_length=1 must filter out every
+        fragment, since every real fragment exceeds 1bp. This is the first test
+        anywhere that the SE length filter actually removes fragments on its
+        primary (BAM, single_end=True) use case. Removing the `single_end and`
+        conjunct from the :782 gate does not change this test's outcome (the
+        filter still applies either way), so this test alone does not detect
+        that mutation — it is the companion test above that does.
+
+        build_fragments_h5 raises ValueError rather than writing an empty h5
+        when zero fragments survive filtering (see the "No fragments were
+        extracted" check in build_fragments_h5); that ValueError is the
+        observable signal here that every fragment was dropped.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            with pytest.raises(ValueError, match="No fragments were extracted"):
+                build_fragments_h5(
+                    bam_path,
+                    output,
+                    fasta_filename=fasta_file_path,
+                    single_end=True,
+                    se_max_fragment_length=1,
+                    num_processes=1,
+                )
 
 
 # ── is_fragment_file ──
