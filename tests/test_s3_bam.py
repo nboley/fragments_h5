@@ -6,11 +6,14 @@ Requires:
 - An indexed BAM at the URL (htslib looks for .bai at same path + .bai)
 """
 import os
+import sys
 import tempfile
+import unittest.mock
 import pytest
 import pysam
 
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5, _is_remote_url, _resolve_input_path
+import fragments_h5.main as main_module
 
 # Test data on S3 (index must exist at same path + .bai)
 S3_BAM_URL = "s3://fragmentomics.kariusdx.com/nboley/fragments_h5_test_data/small.chr6.bam"
@@ -188,37 +191,46 @@ def test_resolve_input_path():
     assert _resolve_input_path(None) is None
 
 
-def test_gs_url_takes_remote_branch():
-    """Widening _is_remote_url to gs:// changes main.py's index-validation branch.
+def test_gs_url_takes_main_remote_index_branch():
+    """Widening _is_remote_url to gs:// changes main.py's index-validation branch
+    (main.py:100-108): an unindexed gs:// BAM must raise SystemExit with the
+    remote-specific message, not fall through to `samtools index`.
 
-    A gs:// BAM should be classified as remote, meaning main.py would take the
-    remote path (skip local samtools indexing, raise SystemExit if no index).
-    This pins the behavioral side effect of the gs:// widening.
+    We drive this through fragments_h5.main.main() itself with a patched argv,
+    mocking pysam.AlignmentFile (no network) so the real branch predicate at
+    main.py:103 (`_is_remote_url(args.input_file)`) is exercised for real,
+    rather than re-simulated in the test.
+
+    Mutation this detects: narrowing _is_remote_url back to s3://-only (or
+    dropping gs:// from the remote-URL regex) makes a gs:// input take the
+    local branch instead, calling
+    `subprocess.run(["samtools", "index", "gs://..."], check=True)`. We make
+    that mocked call raise CalledProcessError (as real samtools would on an
+    unreachable/URL path), so under the mutation this test fails right there
+    with CalledProcessError instead of catching the expected SystemExit —
+    a failure directly tied to the branch taken, not incidental fallout from
+    later processing.
+    Verified by reverting _is_remote_url to s3://-only and confirming this
+    test goes red (CalledProcessError instead of the expected SystemExit),
+    then restoring the widened predicate.
     """
-    # gs:// is now recognized as remote
-    assert _is_remote_url("gs://bucket/file.bam")
+    import subprocess
 
-    # Verify _resolve_input_path leaves gs:// alone (the path won't be mangled)
-    assert _resolve_input_path("gs://bucket/file.bam") == "gs://bucket/file.bam"
-
-    # The behavioral test: main.py uses _is_remote_url to decide whether to
-    # attempt local indexing. For a gs:// URL, it should take the remote branch
-    # and raise SystemExit when the BAM has no index, rather than trying
-    # `samtools index gs://bucket/file.bam`.
-    # We test this by importing main and verifying the predicate's decision,
-    # then simulating the branch logic:
-    from fragments_h5.fragment import is_fragment_file
+    fake_bam = unittest.mock.MagicMock()
+    fake_bam.__enter__.return_value = fake_bam
+    fake_bam.__exit__.return_value = False
+    fake_bam.has_index.return_value = False
 
     gs_bam = "gs://bucket/file.bam"
-    assert not is_fragment_file(gs_bam)  # it's a BAM path
-    assert _is_remote_url(gs_bam)  # classified as remote
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_h5 = os.path.join(tmpdir, "out.h5")
+        argv = ["build-fragments-h5", gs_bam, out_h5]
+        samtools_error = subprocess.CalledProcessError(1, ["samtools", "index", gs_bam])
+        with unittest.mock.patch.object(sys, "argv", argv), \
+             unittest.mock.patch("fragments_h5.main.pysam.AlignmentFile", return_value=fake_bam), \
+             unittest.mock.patch("subprocess.run", side_effect=samtools_error) as mock_samtools:
+            with pytest.raises(SystemExit, match="Remote BAM"):
+                main_module.main()
 
-    # In main.py, when `not bam.has_index() and _is_remote_url(input_file)`:
-    # it raises SystemExit instead of running `samtools index`.
-    # We can't open a fake gs:// BAM, but we verify the predicate chain works
-    # so the correct branch would be taken. The key assertion is that gs://
-    # doesn't fall through to the local `samtools index` path.
-    # For completeness, verify other scheme forms:
-    assert _is_remote_url("ftp://files.example.com/data.bam")
-    assert not _is_remote_url("/local/path/data.bam")
-    assert not _is_remote_url("relative/path.bam")
+    # The local-indexing fallback (`samtools index`) must not have been reached.
+    mock_samtools.assert_not_called()

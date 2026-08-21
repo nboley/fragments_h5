@@ -168,3 +168,8 @@ cython_debug/
 # EM coordination/status scratch files (per-worktree, not project artifacts)
 COORDINATION.*.md
 STATUS.*.md
+
+# Index files the test suite writes next to test BAMs when run with a
+# relative input path (cwd == repo root). Anchored to the repo root so
+# tracked .bai fixtures under tests/data/ are unaffected.
+/*.bai

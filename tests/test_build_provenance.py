@@ -99,12 +99,14 @@ def test_file_without_provenance_opens():
             single_end=True, se_max_fragment_length=1000,
             num_processes=1, store_fragment_end_clipped=False,
         )
-        # Delete provenance attrs to simulate a pre-2.12.0 file
+        # Delete provenance attrs to simulate a pre-2.12.0 file.
+        # _build_argv is genuinely conditional here: this file was built without
+        # build_argv (see call above), so it was never written. _build_version is
+        # always present for an installed build, so it is deleted unconditionally.
         with h5py.File(h5_path, "r+") as f:
             if "_build_argv" in f.attrs:
                 del f.attrs["_build_argv"]
-            if "_build_version" in f.attrs:
-                del f.attrs["_build_version"]
+            del f.attrs["_build_version"]
 
         with FragmentsH5(h5_path) as fh5:
             assert fh5.build_argv is None
