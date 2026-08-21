@@ -81,7 +81,7 @@ def test_build_fragments_h5_from_s3_bam():
         )
         assert os.path.isfile(out_h5)
         with FragmentsH5(out_h5) as fh5:
-            assert fh5.n_fragments >= 0
+            assert fh5.n_fragments > 0, "Fixture BAM is known to contain fragments"
             # At least one contig should have data if BAM has fragments
             if fh5.contig_lengths:
                 contig = next(iter(fh5.contig_lengths))

@@ -319,8 +319,23 @@ def test_contig_with_single_mapped_read_included():
             assert starts_b[0] == 5000
 
 
-def test_contig_with_zero_mapped_reads_skipped(caplog):
-    """A contig with 0 mapped reads should be skipped, and an info message logged."""
+def test_contig_with_zero_mapped_reads_skipped(caplog, monkeypatch):
+    """A contig with 0 mapped reads should be skipped without dispatching a
+    worker task for it, and an info message logged.
+
+    The skip predicate (fragments_h5.py:1083-1085) doesn't change what ends
+    up in the output -- build_sub_fragments_h5 already returns None for a
+    zero-fragment chunk, so `"contigB" not in fh5.data` holds either way.
+    What the skip predicate actually changes is whether a worker task is
+    dispatched for contigB at all. So the `"contigB" not in fh5.data`
+    assertion below is a baseline sanity check (data absence, expected
+    regardless of the skip logic), not evidence the skip ran. The two
+    assertions with teeth are: (1) the log message, and (2) the monkeypatch
+    spy confirming build_sub_fragments_h5 is never invoked for contigB --
+    that's the direct, observable difference the skip logic produces.
+    """
+    import fragments_h5.fragments_h5 as fh5_module
+
     with tempfile.TemporaryDirectory() as tmpdir:
         bam = os.path.join(tmpdir, "zero_reads.bam")
         reads = [
@@ -330,8 +345,21 @@ def test_contig_with_zero_mapped_reads_skipped(caplog):
         _write_se_bam(bam, [("contigA", 10000), ("contigB", 10000)], reads)
 
         h5 = os.path.join(tmpdir, "out.h5")
+
+        called_contigs = []
+        original_worker = fh5_module.build_sub_fragments_h5
+
+        def _spy(args):
+            called_contigs.append(args[1])  # bam_contig
+            return original_worker(args)
+
+        monkeypatch.setattr(fh5_module, "build_sub_fragments_h5", _spy)
+
         with caplog.at_level(logging.INFO):
             _build_se_h5(bam, h5)
+
+        assert "contigB" not in called_contigs, "No worker task should be dispatched for contigB"
+        assert "contigA" in called_contigs
 
         assert "contigB" not in FragmentsH5(h5).data
         assert any("skipping" in r.message and "zero mapped" in r.message for r in caplog.records)
