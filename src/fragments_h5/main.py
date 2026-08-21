@@ -36,6 +36,15 @@ def parse_args():
         "--single-end", default=False, action="store_true", help="Sequencing is single ended (useful for long read technologies)"
     )
     parser.add_argument(
+        "--se-max-fragment-length", type=int, default=None,
+        help="Maximum fragment length to include in single-end mode (required with --single-end). "
+             "Fragments longer than this are excluded.",
+    )
+    parser.add_argument(
+        "--min-mapq", type=int, default=None,
+        help="Minimum mapping quality to include a fragment (default: 0, i.e. keep all)",
+    )
+    parser.add_argument(
         "--include-duplicates", default=False, action="store_true", help="Include duplicate-marked fragments in the output (default: exclude duplicates)"
     )
     parser.add_argument(
@@ -63,6 +72,20 @@ def main():
     args = parse_args()
 
     logging.configure_root_logger_from_args(args)
+
+    # Argument-consistency checks run before any filesystem work: the indexing
+    # below can shell out to samtools/tabix and write a .bai/.tbi next to the
+    # input, which must not happen for an invocation we are about to reject.
+    if args.single_end and args.se_max_fragment_length is None:
+        raise SystemExit("--se-max-fragment-length is required when using --single-end")
+    if args.se_max_fragment_length is not None and not args.single_end:
+        raise SystemExit("--se-max-fragment-length can only be used with --single-end")
+    # TSV/BED input carries no MAPQ, so tsv_to_fragments ignores min_mapq and records
+    # mapq1=None for every fragment. Reject rather than silently discard the filter.
+    if args.min_mapq is not None and is_fragment_file(args.input_file):
+        raise SystemExit(
+            "--min-mapq cannot be used with TSV/BED input: fragment files carry no MAPQ."
+        )
 
     if os.path.exists(args.output_frags_h5):
         logger.error(
@@ -141,11 +164,13 @@ def main():
         read_strand=not args.exclude_strand,
         read_methyl=args.read_methyl,
         single_end=args.single_end,
+        se_max_fragment_length=args.se_max_fragment_length,
         num_processes=num_processes,
         include_duplicates=args.include_duplicates,
         store_fragment_end_clipped=args.store_fragment_end_clipped,
         skip_chunking=args.skip_chunking,
         contig_name_map=contig_name_map,
+        min_mapq=args.min_mapq,
     )
 
 
