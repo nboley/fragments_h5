@@ -779,7 +779,7 @@ def build_sub_fragments_h5(args):
             if fragment.start < chunk_start or fragment.start >= chunk_stop:
                 continue
             # In SE mode, filter out fragments longer than the max
-            if se_max_fragment_length is not None and (fragment.stop - fragment.start) > se_max_fragment_length:
+            if single_end and se_max_fragment_length is not None and (fragment.stop - fragment.start) > se_max_fragment_length:
                 continue
             # if we have filled this chunk then resize the array
             if ff % CHUNK_SIZE == 0:
@@ -975,6 +975,11 @@ def build_fragments_h5(
             raise ValueError("--read-methyl is not supported for TSV/BED input (methylation data unavailable)")
         if single_end:
             logger.warning("--single-end flag is meaningless for TSV/BED input; ignoring")
+            single_end = False
+            se_max_fragment_length = None
+        if min_mapq is not None:
+            logger.warning("--min-mapq flag is meaningless for TSV/BED input (no MAPQ in fragment files); ignoring")
+            min_mapq = None
         if include_duplicates:
             logger.warning("--include-duplicates flag is meaningless for TSV/BED input (no duplicate marking); ignoring")
         if set_mapq_255_to_none:

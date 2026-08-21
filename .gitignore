@@ -164,3 +164,7 @@ cython_debug/
 
 # Claude Code worktrees (keep other .claude/ content like settings and skills)
 .claude/worktrees/
+
+# EM coordination/status scratch files (per-worktree, not project artifacts)
+COORDINATION.*.md
+STATUS.*.md

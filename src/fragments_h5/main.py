@@ -37,12 +37,12 @@ def parse_args():
     )
     parser.add_argument(
         "--se-max-fragment-length", type=int, default=None,
-        help="Maximum fragment length to include in single-end mode (required with --single-end). "
-             "Fragments longer than this are excluded.",
+        help="Maximum fragment length to include in single-end mode (required with --single-end for BAM input). "
+             "Fragments longer than this are excluded. Must be between 1 and 65535.",
     )
     parser.add_argument(
         "--min-mapq", type=int, default=None,
-        help="Minimum mapping quality to include a fragment (default: 0, i.e. keep all)",
+        help="Minimum mapping quality to include a fragment (default: 0, i.e. keep all). Must be >= 0.",
     )
     parser.add_argument(
         "--include-duplicates", default=False, action="store_true", help="Include duplicate-marked fragments in the output (default: exclude duplicates)"
@@ -60,7 +60,7 @@ def parse_args():
         help="Disable chunk-based parallelization and process each contig as a whole",
     )
 
-    return parser.parse_args()
+    return parser, parser.parse_args()
 
 
 def _is_remote_url(path: str) -> bool:
@@ -69,23 +69,31 @@ def _is_remote_url(path: str) -> bool:
 
 
 def main():
-    args = parse_args()
+    parser, args = parse_args()
 
     logging.configure_root_logger_from_args(args)
 
-    # Argument-consistency checks run before any filesystem work: the indexing
-    # below can shell out to samtools/tabix and write a .bai/.tbi next to the
-    # input, which must not happen for an invocation we are about to reject.
-    if args.single_end and args.se_max_fragment_length is None:
-        raise SystemExit("--se-max-fragment-length is required when using --single-end")
-    if args.se_max_fragment_length is not None and not args.single_end:
-        raise SystemExit("--se-max-fragment-length can only be used with --single-end")
-    # TSV/BED input carries no MAPQ, so tsv_to_fragments ignores min_mapq and records
-    # mapq1=None for every fragment. Reject rather than silently discard the filter.
-    if args.min_mapq is not None and is_fragment_file(args.input_file):
-        raise SystemExit(
-            "--min-mapq cannot be used with TSV/BED input: fragment files carry no MAPQ."
-        )
+    # Argument-consistency checks run before the input-file indexing below,
+    # which can shell out to samtools/tabix and write a .bai/.tbi next to the
+    # input — that must not happen for an invocation we are about to reject.
+    input_is_tsv = is_fragment_file(args.input_file)
+
+    # Range validation
+    if args.se_max_fragment_length is not None:
+        if args.se_max_fragment_length < 1 or args.se_max_fragment_length > 65535:
+            parser.error("--se-max-fragment-length must be between 1 and 65535")
+    if args.min_mapq is not None and args.min_mapq < 0:
+        parser.error("--min-mapq must be >= 0")
+
+    # For BAM input, --se-max-fragment-length is required with --single-end
+    # and --se-max-fragment-length requires --single-end.
+    # For TSV/BED input, --single-end and --se-max-fragment-length are ignored
+    # (the library warns and neutralizes them).
+    if not input_is_tsv:
+        if args.single_end and args.se_max_fragment_length is None:
+            parser.error("--se-max-fragment-length is required when using --single-end")
+        if args.se_max_fragment_length is not None and not args.single_end:
+            parser.error("--se-max-fragment-length can only be used with --single-end")
 
     if os.path.exists(args.output_frags_h5):
         logger.error(
