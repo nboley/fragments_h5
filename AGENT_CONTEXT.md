@@ -18,8 +18,9 @@
 - Interval query support with bisection algorithm
 - Multiprocessing build pipeline (using fork for HDF5 safety)
 - tqdm progress bar during build (weighted by contig length)
-- S3 streaming support for BAM and FASTA files
+- S3/GS/HTTP streaming support for BAM and FASTA files (any htslib-supported scheme)
 - Optional metadata: GC content, strand, mapping quality, methylation, fragment clipping status
+- Build provenance: `_build_argv` (CLI invocations) and `_build_version` recorded in the h5
 
 **Target Use Cases:**
 - Cell-free DNA analysis and fragmentomics research
@@ -51,6 +52,14 @@
 **HDF5 Layout:**
 ```
 /
+├── attrs:
+│   ├── index_block_size          [int]
+│   ├── max_fragment_length       [int, always 65535]
+│   ├── _bam_header               [str, "" for TSV input]
+│   ├── _source_format            [str, "BAM" or "TSV"]
+│   ├── _contig_lengths_str       [str, Python dict literal]
+│   ├── _build_argv               [str, JSON array] (optional, CLI builds only)
+│   └── _build_version            [str] (optional, absent if package not installed)
 ├── data/
 │   └── {contig}/
 │       ├── starts          [int32, sorted]
@@ -152,6 +161,8 @@ fragments_h5/
 │   ├── variant_config.yaml
 │   └── conda_build_config.yaml
 ├── docs/
+│   ├── architecture/
+│   │   └── fragment_selection_and_build_provenance.md
 │   └── plan_chunk_based_parallelization.md
 ├── pyproject.toml              # pip package metadata
 ├── setup.py                    # Cython extension build
@@ -186,9 +197,10 @@ class FragmentsH5:
     def fetch_counts(self, contig, region_start, region_stop):
         """Count fragments in region"""
         
-    # Properties: filename, name, has_methyl, has_strand, 
+    # Properties: filename, name, has_methyl, has_strand,
     #            has_fragment_end_clipped, max_fragment_length,
-    #            fragment_length_counts, n_fragments
+    #            fragment_length_counts, n_fragments,
+    #            build_argv, build_version, source_format
 ```
 
 **Build Functions:**
@@ -198,7 +210,8 @@ def build_fragments_h5(input_fname, ofname, fasta_filename=None,
                       read_strand=True, read_methyl=False, single_end=False,
                       se_max_fragment_length=None, num_processes=None,
                       include_duplicates=False, store_fragment_end_clipped=True,
-                      skip_chunking=False, contig_name_map=None, min_mapq=None):
+                      skip_chunking=False, contig_name_map=None, min_mapq=None,
+                      *, build_argv=None):
     """Main entry point for building fragment H5 from BAM or TSV/BED"""
 
 def build_sub_fragments_h5(args):
@@ -237,14 +250,18 @@ class Fragment:
 
 **BAM Parsing:**
 ```python
-def bam_to_fragments(bam, contig=None, region_start=None, region_stop=None,
-                     fasta=None, set_mapq_255_to_none=False, read_strand=True,
-                     read_methyl=False, include_duplicates=False,
-                     store_fragment_end_clipped=True):
-    """Paired-end BAM → Fragment iterator"""
-    
-def single_end_bam_to_fragments(bam, ...):
-    """Single-end BAM → Fragment iterator"""
+def bam_to_fragments(bam, contig, start, stop, fasta_file, max_tlen,
+                     min_mapq, include_duplicates, ...):
+    """Paired-end BAM → Fragment iterator
+    Filters: is_qcfail, is_secondary, is_supplementary, is_duplicate (unless included),
+             is_unmapped, mate_is_unmapped, tlen==0, abs(tlen)>max_tlen, mapq<min_mapq"""
+
+def single_end_bam_to_fragments(bam, ..., se_max_fragment_length=None):
+    """Single-end BAM → Fragment iterator
+    Filters: is_qcfail, is_secondary, is_supplementary, is_duplicate (unless included),
+             is_unmapped, mapq<min_mapq
+    Over-length: if se_max_fragment_length is None and span > 65535, raises ValueError;
+                 if set, the skip happens at the chunk level in build_sub_fragments_h5"""
 ```
 
 #### `sequence.pyx` (Cython Performance-Critical Code)
@@ -292,7 +309,7 @@ def one_hot_encode_sequences(sequences: list[str]) -> np.ndarray:
 ### 4.1 Dependencies
 
 **Runtime:**
-- `numpy` - Array operations
+- `numpy >= 1.24` - Array operations (floor ensures out-of-range integer assignment raises rather than wraps)
 - `h5py` - HDF5 file I/O
 - `pysam` - BAM/FASTA reading (requires htslib with S3 support for S3 URLs)
 - `tqdm` - Progress bars
@@ -441,9 +458,13 @@ make docker
 
 ### 6.1 S3 Support
 
-**Supported URLs:**
+**Supported URLs (any scheme htslib recognizes):**
 - `s3://bucket/path/to/file.bam`
+- `gs://bucket/path/to/file.bam`
 - `http(s)://url/to/file.bam`
+- `ftp://url/to/file.bam`
+
+The remote URL predicate uses a generic scheme regex (`^[a-z][a-z0-9+.\-]*://`), so any scheme htslib supports now or gains later is handled without code changes.
 
 **Requirements:**
 - pysam/htslib built with S3 support (libcurl)
@@ -491,7 +512,9 @@ def _temporary_working_directory():
 
 **Fragment Length:**
 - Maximum: 65535 (uint16 limit)
-- Longer fragments silently truncated or cause overflow
+- In single-end mode without `--se-max-fragment-length`: over-long spans raise `ValueError` naming the contig, position, read, and CIGAR
+- In single-end mode with `--se-max-fragment-length`: over-long spans are silently skipped
+- In paired-end mode: `max_tlen` filter silently skips reads with `abs(tlen) > MAX_FRAG_LENGTH`
 
 **Mapping Quality:**
 - Stored as uint8 (0-255)
@@ -606,6 +629,10 @@ print(fh5.n_fragments)
 print(fh5.has_gc)
 print(fh5.has_strand)
 print(fh5.has_methyl)
+
+# Build provenance (None for files built before this feature)
+print(fh5.build_argv)      # list of CLI args, or None
+print(fh5.build_version)   # package version string, or None
 ```
 
 **Build Programmatically:**
@@ -626,6 +653,8 @@ build_fragments_h5(
     include_duplicates=False,
     store_fragment_end_clipped=True,
     min_mapq=30,
+    # build_argv is keyword-only; omit for library callers (records _build_version only)
+    # CLI passes build_argv=sys.argv automatically
 )
 ```
 
@@ -1054,7 +1083,6 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 **Features:**
 - Support CSI indexes (in addition to BAI)
 - Support alternative methylation tag formats
-- Provenance attributes: record build-time filter parameters (min_mapq, se_max_fragment_length) in h5 metadata (design pending)
 
 **Usability:**
 - Validate FASTA/BAM compatibility (contig names)
@@ -1074,6 +1102,14 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 **Issues:** https://github.com/nboley/fragments_h5/issues
 
 ---
+
+### Unreleased (fragment-selection-and-provenance branch)
+- **Secondary alignment exclusion:** `is_secondary` now excluded in both paired-end (`bam_to_align`) and single-end (`single_end_bam_to_fragments`) filters. Unconditional, no flag. Measured impact on current data: zero (0 secondary alignments in ~61k sampled reads across fixtures and two production BAMs, because `bwa-mem2`/`bowtie2` are not given `-a`/`-k`). If an aligner config ever gains `-a`/`-k`, this becomes material.
+- **SE over-length span raises `ValueError`:** When `se_max_fragment_length` is unset, a single-end read whose reference span exceeds 65535 now raises `ValueError` with contig, position, read name, and CIGAR — instead of an opaque `OverflowError` from inside a multiprocessing worker. When `se_max_fragment_length` is set, over-long spans are still silently skipped.
+- **`num_mapped` fix:** `num_mapped_alignments` (formerly `num_mapped`) no longer halves the alignment count with `// 2`. A single-end contig with exactly one mapped read is no longer silently dropped.
+- **S3 input fix:** `os.path.abspath` was mangling `s3://b/k.bam` into `/cwd/s3:/b/k.bam`. Remote URLs are now detected by a generic scheme regex and left untouched. Also covers `gs://`, `https://`, `ftp://`, etc.
+- **Build provenance:** New h5 attributes `_build_argv` (JSON array, CLI builds only) and `_build_version` (package version string). Exposed as `FragmentsH5.build_argv` and `FragmentsH5.build_version`. Both return `None` on files that predate this feature. `build_argv` is keyword-only in `build_fragments_h5()`; library callers get `_build_version` only.
+- **`numpy>=1.24` floor:** Added to `pyproject.toml` dependencies. Ensures out-of-range uint16 assignment always raises, closing the last environment-dependent failure mode.
 
 ### v2.11.0 Changelog
 - **`--se-max-fragment-length` CLI flag:** Maximum fragment length filter for single-end mode. Required with `--single-end` for BAM input. Range: 1–65535 (uint16 `lengths_arr` limit). Fragments with alignment span exceeding this value are excluded.

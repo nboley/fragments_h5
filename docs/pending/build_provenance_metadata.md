@@ -1,6 +1,11 @@
 # Build Provenance Metadata for fragments h5 files
 
-**Status:** proposal (not implemented). **Target:** `fragments_h5` @ `main` / `v2.11.0` (`aa753c7`).
+**Status:** REJECTED — superseded by `docs/architecture/fragment_selection_and_build_provenance.md`.
+The `requested`/`effective`/`neutralized` schema proposed here was explicitly rejected as
+over-engineered. The simpler design (two flat attributes: `_build_argv` + `_build_version`)
+was implemented instead. This document is retained for historical context only.
+
+**Original status:** proposal (not implemented). **Target:** `fragments_h5` @ `main` / `v2.11.0` (`aa753c7`).
 
 A fragments h5 records nothing about how it was built. Several build-time filters are *destructive* — filtered fragments never enter the file and no reader can recover them — yet two h5s built from the same BAM with different filter settings carry byte-identical metadata. This document proposes recording the effective build parameters, the builder version, and the CLI invocation as a single JSON-encoded root attribute `_build_provenance`, plus a `has_build_provenance` reader property so that *absence* is a first-class, detectable state rather than silently masquerading as defaults. The design follows the existing `_source_format` backward-compatibility precedent (`fragments_h5.py:296`), requires no change to the multiprocessing worker interface, and deliberately fixes one thing it inherits: it uses `json.loads` rather than the `eval()` the `_contig_lengths_str` attribute uses today (`fragments_h5.py:293`).
 

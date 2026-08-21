@@ -125,13 +125,16 @@ The returned starts and ends can then be used to construct an array of midpoints
 ```
 filename               : return an absolute path to the h5 filename
 name                   : alias for filename
-ref                    : the name of the reference genome
-sample_id              : identifier for the sample that this data originates from (set at creation time)
 has_methyl             : whether or not the fragment h5 contains cpg and converted cpg counts
 has_strand             : whether or not the fragment h5 contains strand information
+has_gc                 : whether or not the fragment h5 contains gc content
 has_fragment_end_clipped : whether or not the fragment h5 contains the fragment_end_clipped flag (0/1/255 per fragment)
 max_fragment_length    : the maximum fragment length stored
 fragment_length_counts : an array of fragment counts for each fragment length from 0 to max_fragment_length
+n_fragments            : total number of fragments (sum of fragment_length_counts)
+source_format          : "BAM" or "TSV" (the input format used to build the h5)
+build_argv             : list of CLI arguments used to build the h5, or None (library callers / pre-provenance files)
+build_version          : package version string of the builder, or None (uninstalled tree / pre-provenance files)
 ```
 
 #### FragmentsH5.init(...)
