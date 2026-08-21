@@ -6,19 +6,18 @@ Requires:
 - An indexed BAM at the URL (htslib looks for .bai at same path + .bai)
 """
 import os
+import sys
 import tempfile
+import unittest.mock
 import pytest
 import pysam
 
-from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5
+from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5, _is_remote_url, _resolve_input_path
+import fragments_h5.main as main_module
 
 # Test data on S3 (index must exist at same path + .bai)
 S3_BAM_URL = "s3://fragmentomics.kariusdx.com/nboley/fragments_h5_test_data/small.chr6.bam"
 S3_FASTA_URL = "s3://fragmentomics.kariusdx.com/nboley/fragments_h5_test_data/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz"
-
-
-def _is_remote_url(path: str) -> bool:
-    return path.startswith("s3://") or path.startswith("http://") or path.startswith("https://")
 
 
 def _pysam_can_open_s3():
@@ -82,7 +81,7 @@ def test_build_fragments_h5_from_s3_bam():
         )
         assert os.path.isfile(out_h5)
         with FragmentsH5(out_h5) as fh5:
-            assert fh5.n_fragments >= 0
+            assert fh5.n_fragments > 0, "Fixture BAM is known to contain fragments"
             # At least one contig should have data if BAM has fragments
             if fh5.contig_lengths:
                 contig = next(iter(fh5.contig_lengths))
@@ -166,3 +165,72 @@ def test_build_fragments_h5_from_s3_bam_with_s3_fasta():
                         # At least some GC values should be non-NaN (not all regions are N's)
                         non_nan_count = (~np.isnan(gc_values)).sum()
                         assert non_nan_count > 0, "All GC values are NaN - FASTA streaming may have failed"
+
+
+# --- Unit tests for _resolve_input_path and _is_remote_url ---
+
+def test_resolve_input_path():
+    """_resolve_input_path leaves remote URLs untouched, absolutizes local paths."""
+    # Remote URLs unchanged
+    assert _resolve_input_path("s3://bucket/key.bam") == "s3://bucket/key.bam"
+    assert _resolve_input_path("gs://bucket/key.bam") == "gs://bucket/key.bam"
+    assert _resolve_input_path("https://example.com/file.bam") == "https://example.com/file.bam"
+
+    # Local relative paths get absolutized
+    with tempfile.TemporaryDirectory() as tmpdir:
+        orig_cwd = os.getcwd()
+        try:
+            os.chdir(tmpdir)
+            result = _resolve_input_path("relative/path.bam")
+            assert os.path.isabs(result)
+            assert result == os.path.join(tmpdir, "relative/path.bam")
+        finally:
+            os.chdir(orig_cwd)
+
+    # None passthrough
+    assert _resolve_input_path(None) is None
+
+
+def test_gs_url_takes_main_remote_index_branch():
+    """Widening _is_remote_url to gs:// changes main.py's index-validation branch
+    (main.py:100-108): an unindexed gs:// BAM must raise SystemExit with the
+    remote-specific message, not fall through to `samtools index`.
+
+    We drive this through fragments_h5.main.main() itself with a patched argv,
+    mocking pysam.AlignmentFile (no network) so the real branch predicate at
+    main.py:103 (`_is_remote_url(args.input_file)`) is exercised for real,
+    rather than re-simulated in the test.
+
+    Mutation this detects: narrowing _is_remote_url back to s3://-only (or
+    dropping gs:// from the remote-URL regex) makes a gs:// input take the
+    local branch instead, calling
+    `subprocess.run(["samtools", "index", "gs://..."], check=True)`. We make
+    that mocked call raise CalledProcessError (as real samtools would on an
+    unreachable/URL path), so under the mutation this test fails right there
+    with CalledProcessError instead of catching the expected SystemExit —
+    a failure directly tied to the branch taken, not incidental fallout from
+    later processing.
+    Verified by reverting _is_remote_url to s3://-only and confirming this
+    test goes red (CalledProcessError instead of the expected SystemExit),
+    then restoring the widened predicate.
+    """
+    import subprocess
+
+    fake_bam = unittest.mock.MagicMock()
+    fake_bam.__enter__.return_value = fake_bam
+    fake_bam.__exit__.return_value = False
+    fake_bam.has_index.return_value = False
+
+    gs_bam = "gs://bucket/file.bam"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_h5 = os.path.join(tmpdir, "out.h5")
+        argv = ["build-fragments-h5", gs_bam, out_h5]
+        samtools_error = subprocess.CalledProcessError(1, ["samtools", "index", gs_bam])
+        with unittest.mock.patch.object(sys, "argv", argv), \
+             unittest.mock.patch("fragments_h5.main.pysam.AlignmentFile", return_value=fake_bam), \
+             unittest.mock.patch("subprocess.run", side_effect=samtools_error) as mock_samtools:
+            with pytest.raises(SystemExit, match="Remote BAM"):
+                main_module.main()
+
+    # The local-indexing fallback (`samtools index`) must not have been reached.
+    mock_samtools.assert_not_called()

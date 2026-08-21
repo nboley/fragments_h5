@@ -14,6 +14,10 @@ from fragments_h5.sequence import one_hot_encode_sequences
 
 DEFAULT_MIN_MAPQ = 0
 
+# the fragment lengths are stored as a uint16, so the max fragment length is
+# 2**16-1 == 65536-1 == 65535
+MAX_FRAG_LENGTH = 65535
+
 
 logging.basicConfig(format="%(levelname)s\t%(asctime)-15s\t%(message)s")
 log = logging.getLogger(__name__)
@@ -371,6 +375,7 @@ def bam_to_align(
             align_.tlen == 0
             or abs(align_.tlen) > max_tlen
             or align_.is_qcfail
+            or align_.is_secondary
             or align_.is_supplementary
             or (not include_duplicates and align_.is_duplicate)
             or align_.is_unmapped
@@ -557,6 +562,7 @@ def single_end_bam_to_fragments(
         fasta_region_start=None,
         fasta_region_stop=None,
         fasta_chrom=None,
+        se_max_fragment_length=None,
     ):
     g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
         fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
@@ -572,6 +578,7 @@ def single_end_bam_to_fragments(
         for align in align_iter:
             if (
                 align.is_qcfail
+                or align.is_secondary
                 or align.is_supplementary
                 or (not include_duplicates and align.is_duplicate)
                 or align.is_unmapped
@@ -580,6 +587,18 @@ def single_end_bam_to_fragments(
 
             frag_start = align.pos
             frag_stop = align.aend
+
+            if se_max_fragment_length is None and frag_stop - frag_start > MAX_FRAG_LENGTH:
+                raise ValueError(
+                    f"Single-end fragment length {frag_stop - frag_start} exceeds the "
+                    f"maximum storable length {MAX_FRAG_LENGTH}\n"
+                    f"  contig={align.reference_name} start={frag_start} stop={frag_stop} "
+                    f"read={align.query_name} cigar={align.cigarstring}\n"
+                    f"The reference span of a single-end read (including D/N CIGAR operations) "
+                    f"is used as the fragment length. Pass --se-max-fragment-length to skip "
+                    f"reads whose span exceeds a threshold; {MAX_FRAG_LENGTH} is a hard storage "
+                    f"limit and cannot be raised."
+                )
 
             if g_or_c_cumsum is None or frag_stop == frag_start:
                 gc = None

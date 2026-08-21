@@ -137,7 +137,10 @@ WGS: Execution time: 3.130281925201416
 Capture: Execution time: 5.176678895950317
 
 """
+import importlib.metadata
+import json
 import os
+import re
 import tempfile
 import multiprocessing
 import signal
@@ -153,7 +156,7 @@ import fragments_h5._logging as logging
 from fragments_h5.fragment import (
     bam_to_fragments, single_end_bam_to_fragments, Fragment,
     is_fragment_file, tsv_to_fragments, scan_tsv_contigs,
-    DEFAULT_MIN_MAPQ,
+    DEFAULT_MIN_MAPQ, MAX_FRAG_LENGTH,
 )
 
 
@@ -171,11 +174,20 @@ INDEX_BLOCK_SIZE = 5000
 # Size of genomic chunks for parallelization (10M bases)
 GENOMIC_CHUNK_SIZE = 10_000_000
 
-# the fragment lengths are stored as a uint16, so the max fragment length is
-# 2**16-1 == 65536-1 == 65535
-MAX_FRAG_LENGTH = 65535
 # this parameter is for dynamically resizing the array as it grows
 CHUNK_SIZE = 1000000
+
+_REMOTE_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
+
+def _is_remote_url(path):
+    """True for anything htslib will treat as a URL (s3://, gs://, http(s)://, ftp://)."""
+    return bool(_REMOTE_URL_RE.match(str(path)))
+
+def _resolve_input_path(path):
+    """Absolutize local paths so workers can chdir; leave remote URLs untouched."""
+    if path is None or _is_remote_url(path):
+        return path
+    return os.path.abspath(path)
 
 
 class FragmentsH5:
@@ -294,6 +306,9 @@ class FragmentsH5:
         self.index_block_size = self._f.attrs["index_block_size"]
         self.max_fragment_length = self._f.attrs["max_fragment_length"]
         self.source_format = self._f.attrs.get("_source_format", "BAM")
+        _argv = self._f.attrs.get("_build_argv")
+        self.build_argv = json.loads(_argv) if _argv is not None else None
+        self.build_version = self._f.attrs.get("_build_version")
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
 
@@ -769,11 +784,12 @@ def build_sub_fragments_h5(args):
         # Use bam_contig for reading from BAM; output_contig for FASTA lookup (when names differ)
         fasta_chrom = output_contig if output_contig != bam_contig else None
         _min_mapq = min_mapq if min_mapq is not None else DEFAULT_MIN_MAPQ
+        _se_kwargs = {"se_max_fragment_length": se_max_fragment_length} if single_end else {}
         for fragment in input_to_fragments(
             input_fname, chrom=bam_contig, start=chunk_start, stop=chunk_stop,
             max_tlen=MAX_FRAG_LENGTH, fasta_file=fasta_file, include_duplicates=include_duplicates,
             fasta_region_start=fasta_region_start, fasta_region_stop=fasta_region_stop,
-            fasta_chrom=fasta_chrom, min_mapq=_min_mapq,
+            fasta_chrom=fasta_chrom, min_mapq=_min_mapq, **_se_kwargs,
         ):
             # Only include fragments whose start position falls within this chunk
             if fragment.start < chunk_start or fragment.start >= chunk_stop:
@@ -931,6 +947,8 @@ def build_fragments_h5(
     skip_chunking=False,
     contig_name_map=None,
     min_mapq=None,
+    *,
+    build_argv=None,
 ):
     """Write a fragments h5 from the fragments in input_fname to ofname'
     input_fname can be either a bam file or a fragments tsv / bed
@@ -955,12 +973,12 @@ def build_fragments_h5(
         raise NotImplementedError("Methylation tag parsing is not currently implemented for single ended reads")
 
     if fasta_filename is not None:
-        fasta_filename = os.path.abspath(fasta_filename)
+        fasta_filename = _resolve_input_path(fasta_filename)
         read_gc = True
     else:
         read_gc = False
 
-    input_fname = os.path.abspath(input_fname)
+    input_fname = _resolve_input_path(input_fname)
 
     # save metadata about the bam into the h5.
     # In particular, find the contigs and lengths, and save them into the h5.
@@ -1026,8 +1044,8 @@ def build_fragments_h5(
             if allowed_contigs is None:
                 allowed_contigs = bam_fp.references
             contig_lengths_str = str({c: all_contig_lengths[c] for c in allowed_contigs})
-            num_mapped = {
-                x.contig: x.mapped // 2
+            num_mapped_alignments = {
+                x.contig: x.mapped
                 for x in bam_fp.get_index_statistics()
                 if allowed_contigs is None or x.contig in allowed_contigs
             }
@@ -1059,9 +1077,11 @@ def build_fragments_h5(
     with tempfile.TemporaryDirectory() as tmp_dir:
         args = []
 
+        skipped_contigs = []
         for bam_contig in contig_lengths.keys():
-            # skip contigs with zero mapped reads (BAM only; TSV tabix only lists contigs with data)
-            if not is_tsv_input and num_mapped[bam_contig] == 0:
+            # skip contigs with zero mapped alignments (BAM only; TSV tabix only lists contigs with data)
+            if not is_tsv_input and num_mapped_alignments[bam_contig] == 0:
+                skipped_contigs.append(bam_contig)
                 continue
 
             output_contig = _map_name(bam_contig)
@@ -1081,6 +1101,14 @@ def build_fragments_h5(
                     include_duplicates, store_fragment_end_clipped, tmp_dir,
                     min_mapq,
                 ))
+
+        if skipped_contigs:
+            examples = ", ".join(skipped_contigs[:3])
+            suffix = ", ..." if len(skipped_contigs) > 3 else ""
+            logger.info(
+                f"skipping {len(skipped_contigs)} contigs with zero mapped "
+                f"alignments (e.g. {examples}{suffix})"
+            )
 
         # Total genomic bases to process, for progress tracking
         total_bases = sum(a[4] - a[3] for a in args)  # chunk_stop - chunk_start
@@ -1149,6 +1177,12 @@ def build_fragments_h5(
             f.attrs["_bam_header"] = bam_header_str
             f.attrs["_source_format"] = "TSV" if is_tsv_input else "BAM"
             f.attrs["_contig_lengths_str"] = contig_lengths_str
+            if build_argv is not None:
+                f.attrs["_build_argv"] = json.dumps(build_argv)
+            try:
+                f.attrs["_build_version"] = importlib.metadata.version("fragments-h5")
+            except importlib.metadata.PackageNotFoundError:
+                pass
 
             # Group chunk results by contig, sorted by chunk_start
             chunks_by_contig = defaultdict(list)

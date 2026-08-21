@@ -4,7 +4,7 @@ import sys
 
 import pysam
 
-from fragments_h5.fragments_h5 import build_fragments_h5
+from fragments_h5.fragments_h5 import build_fragments_h5, _is_remote_url
 from fragments_h5.fragment import is_fragment_file
 import fragments_h5._logging as logging
 
@@ -61,11 +61,6 @@ def parse_args():
     )
 
     return parser, parser.parse_args()
-
-
-def _is_remote_url(path: str) -> bool:
-    """True if path looks like a remote URL (S3, HTTP) that should not be indexed via samtools."""
-    return path.startswith("s3://") or path.startswith("http://") or path.startswith("https://")
 
 
 def main():
@@ -179,6 +174,7 @@ def main():
         skip_chunking=args.skip_chunking,
         contig_name_map=contig_name_map,
         min_mapq=args.min_mapq,
+        build_argv=sys.argv,
     )
 
 
