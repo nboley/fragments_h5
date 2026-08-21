@@ -234,7 +234,7 @@ options:
   --set-mapq-255-to-none
                         set mapqs of 255 to None
   --exclude-strand      Exclude strand info
-  --read-methyl         Parse cpg's and converted cpg's from YN tag
+  --read-methyl         Parse cpg's and converted cpg's from YM tag
   --single-end          Sequencing is single ended (useful for long read
                         technologies)
   --se-max-fragment-length SE_MAX_FRAGMENT_LENGTH

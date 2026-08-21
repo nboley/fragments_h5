@@ -13,9 +13,24 @@ This guide explains how to build and push Docker images and packages after makin
 
 ## Current Version
 
-The version is automatically read from `pyproject.toml` (currently **2.7.0**).
+The version is automatically read from `pyproject.toml` (currently **2.11.0**).
 
 ## Changelog
+
+### v2.11.0 (unreleased)
+
+**Added:**
+- `--se-max-fragment-length` CLI flag: maximum fragment length filter for single-end mode.
+  Required with `--single-end` for BAM input. Range: 1–65535.
+- `--min-mapq` CLI flag: minimum mapping quality filter (default: 0 = keep all).
+- TSV/BED safety: `--single-end`, `--se-max-fragment-length`, and `--min-mapq` are each
+  warned about and neutralized for TSV/BED input (BAM-only flags).
+- CLI validation: range checks, mutual requirement of `--single-end` and
+  `--se-max-fragment-length` (BAM only).
+- First CLI-level tests; mutation-verified coverage for the SE filter gate.
+
+**Fixed:**
+- `--read-methyl` help text: corrected "YN tag" to "YM tag" (code always read "YM").
 
 ### v2.7.0 (2026-02-11)
 
@@ -36,7 +51,7 @@ The version is automatically read from `pyproject.toml` (currently **2.7.0**).
 
 ## Building and Pushing Docker Image
 
-The Docker image will be pushed to `ghcr.io/nboley/fragments-h5:2.7.0` and `ghcr.io/nboley/fragments-h5:latest`.
+The Docker image will be pushed to `ghcr.io/nboley/fragments-h5:2.11.0` and `ghcr.io/nboley/fragments-h5:latest`.
 
 ### Quick Command
 ```bash
@@ -62,7 +77,7 @@ This will:
    ```bash
    make push
    ```
-   This authenticates, tags, and pushes to `ghcr.io/nboley/fragments-h5:2.7.0`
+   This authenticates, tags, and pushes to `ghcr.io/nboley/fragments-h5:2.11.0`
 
 ### Custom Configuration
 
@@ -123,8 +138,8 @@ make tag  # Still need to tag separately
 
 After pushing, verify the Docker image:
 ```bash
-docker pull ghcr.io/nboley/fragments-h5:2.7.0
-docker run --rm ghcr.io/nboley/fragments-h5:2.7.0 build-fragments-h5 --help
+docker pull ghcr.io/nboley/fragments-h5:2.11.0
+docker run --rm ghcr.io/nboley/fragments-h5:2.11.0 build-fragments-h5 --help
 ```
 
 ## Troubleshooting
