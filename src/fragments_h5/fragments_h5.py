@@ -976,6 +976,10 @@ def build_fragments_h5(
         if single_end:
             logger.warning("--single-end flag is meaningless for TSV/BED input; ignoring")
             single_end = False
+        # Checked independently of single_end: a caller passing only
+        # se_max_fragment_length must still be told it is being ignored.
+        if se_max_fragment_length is not None:
+            logger.warning("--se-max-fragment-length is meaningless for TSV/BED input; ignoring")
             se_max_fragment_length = None
         if min_mapq is not None:
             logger.warning("--min-mapq flag is meaningless for TSV/BED input (no MAPQ in fragment files); ignoring")

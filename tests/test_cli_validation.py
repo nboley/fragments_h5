@@ -3,6 +3,7 @@
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -11,7 +12,9 @@ from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5
 from fragments_h5.fragment import is_fragment_file
 
 DATA_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "data")
-PYTHON = "/home/nathanboley/miniconda3/envs/biomarker_env/bin/python"
+# pytest already runs under an interpreter that has fragments_h5 importable,
+# so reuse it rather than hardcoding a path into one developer's conda env.
+PYTHON = sys.executable
 
 
 def _run_cli(args, expect_fail=False):
