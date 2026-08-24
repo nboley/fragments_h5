@@ -1044,8 +1044,14 @@ def build_fragments_h5(
             if allowed_contigs is None:
                 allowed_contigs = bam_fp.references
             contig_lengths_str = str({c: all_contig_lengths[c] for c in allowed_contigs})
-            num_mapped_alignments = {
-                x.contig: x.mapped
+            # For single-end input, each mapped alignment is a fragment, so a lone
+            # mapped read is a real fragment and must be kept.
+            # For paired-end input, a fragment requires two alignments (the read pair);
+            # a contig with exactly one mapped read cannot have its mate on the same
+            # contig (mapped would then be >= 2), so that lone alignment can never
+            # form a fragment and the contig is safely skippable.
+            num_mapped_fragments = {
+                x.contig: (x.mapped if single_end else x.mapped // 2)
                 for x in bam_fp.get_index_statistics()
                 if allowed_contigs is None or x.contig in allowed_contigs
             }
@@ -1079,8 +1085,8 @@ def build_fragments_h5(
 
         skipped_contigs = []
         for bam_contig in contig_lengths.keys():
-            # skip contigs with zero mapped alignments (BAM only; TSV tabix only lists contigs with data)
-            if not is_tsv_input and num_mapped_alignments[bam_contig] == 0:
+            # skip contigs with zero mapped fragments (BAM only; TSV tabix only lists contigs with data)
+            if not is_tsv_input and num_mapped_fragments[bam_contig] == 0:
                 skipped_contigs.append(bam_contig)
                 continue
 
@@ -1107,7 +1113,7 @@ def build_fragments_h5(
             suffix = ", ..." if len(skipped_contigs) > 3 else ""
             logger.info(
                 f"skipping {len(skipped_contigs)} contigs with zero mapped "
-                f"alignments (e.g. {examples}{suffix})"
+                f"fragments (e.g. {examples}{suffix})"
             )
 
         # Total genomic bases to process, for progress tracking

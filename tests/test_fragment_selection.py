@@ -363,3 +363,103 @@ def test_contig_with_zero_mapped_reads_skipped(caplog, monkeypatch):
 
         assert "contigB" not in FragmentsH5(h5).data
         assert any("skipping" in r.message and "zero mapped" in r.message for r in caplog.records)
+
+
+def test_pe_contig_with_single_mapped_read_skipped(caplog, monkeypatch):
+    """A PE contig with exactly 1 mapped read (mate elsewhere/unmapped) should be
+    skipped without dispatching a worker task for it, and an info message logged.
+
+    A lone mapped alignment on a contig cannot form a fragment in paired-end mode:
+    if its mate were on the same contig, get_index_statistics().mapped would be
+    >= 2. As in test_contig_with_zero_mapped_reads_skipped, asserting
+    "contigB" not in fh5.data would be vacuous here -- a single unpaired read
+    produces no fragment regardless of whether the skip logic runs. The
+    assertions with teeth are the worker-dispatch spy and the log message.
+    """
+    import fragments_h5.fragments_h5 as fh5_module
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bam = os.path.join(tmpdir, "pe_single_read.bam")
+
+        header = {
+            "HD": {"VN": "1.6", "SO": "coordinate"},
+            "SQ": [{"SN": "contigA", "LN": 100000}, {"SN": "contigB", "LN": 10000}],
+        }
+        with pysam.AlignmentFile(bam, "wb", header=header) as outf:
+            # contigA: 5 normal proper pairs
+            for i in range(5):
+                seq_len = 10
+                pos1 = i * 200
+                pos2 = pos1 + 100
+                tlen = 110
+                a1 = pysam.AlignedSegment()
+                a1.query_name = f"pair_{i}"
+                a1.reference_id = outf.get_tid("contigA")
+                a1.reference_start = pos1
+                a1.cigarstring = "10M"
+                a1.mapping_quality = 60
+                a1.query_sequence = "A" * seq_len
+                a1.query_qualities = pysam.qualitystring_to_array("I" * seq_len)
+                a1.flag = 0x1 | 0x2 | 0x20 | 0x40  # paired, proper, mate_reverse, read1
+                a1.next_reference_id = outf.get_tid("contigA")
+                a1.next_reference_start = pos2
+                a1.template_length = tlen
+                outf.write(a1)
+                a2 = pysam.AlignedSegment()
+                a2.query_name = f"pair_{i}"
+                a2.reference_id = outf.get_tid("contigA")
+                a2.reference_start = pos2
+                a2.cigarstring = "10M"
+                a2.mapping_quality = 60
+                a2.query_sequence = "A" * seq_len
+                a2.query_qualities = pysam.qualitystring_to_array("I" * seq_len)
+                a2.flag = 0x1 | 0x2 | 0x10 | 0x80  # paired, proper, reverse, read2
+                a2.next_reference_id = outf.get_tid("contigA")
+                a2.next_reference_start = pos1
+                a2.template_length = -tlen
+                outf.write(a2)
+
+            # contigB: a single mapped read whose mate is unmapped -- exactly one
+            # mapped alignment on the contig, no possible partner for a fragment.
+            lone = pysam.AlignedSegment()
+            lone.query_name = "lone_read"
+            lone.reference_id = outf.get_tid("contigB")
+            lone.reference_start = 5000
+            lone.cigarstring = "10M"
+            lone.mapping_quality = 60
+            lone.query_sequence = "A" * 10
+            lone.query_qualities = pysam.qualitystring_to_array("I" * 10)
+            lone.flag = 0x1 | 0x8 | 0x40  # paired, mate_unmapped, read1
+            lone.next_reference_id = -1
+            lone.next_reference_start = -1
+            lone.template_length = 0
+            outf.write(lone)
+
+        pysam.sort("-o", bam, bam)
+        pysam.index(bam)
+
+        # Anchor the test to the actual precondition rather than an assumption
+        # about how pysam counted it.
+        with pysam.AlignmentFile(bam) as bam_fp:
+            stats = {s.contig: s.mapped for s in bam_fp.get_index_statistics()}
+        assert stats["contigB"] == 1
+
+        h5 = os.path.join(tmpdir, "out.h5")
+
+        called_contigs = []
+        original_worker = fh5_module.build_sub_fragments_h5
+
+        def _spy(args):
+            called_contigs.append(args[1])  # bam_contig
+            return original_worker(args)
+
+        monkeypatch.setattr(fh5_module, "build_sub_fragments_h5", _spy)
+
+        with caplog.at_level(logging.INFO):
+            _build_pe_h5(bam, h5)
+
+        assert "contigB" not in called_contigs, "No worker task should be dispatched for contigB"
+        assert "contigA" in called_contigs
+
+        assert "contigB" not in FragmentsH5(h5).data
+        assert any("skipping" in r.message and "zero mapped" in r.message for r in caplog.records)
