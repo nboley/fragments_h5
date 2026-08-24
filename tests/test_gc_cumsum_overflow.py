@@ -9,8 +9,14 @@ same value (ties-to-even).  Every subsequent cumsum[stop] - cumsum[start] is the
 In production this zeroed GC past ~34-43 Mb on every chromosome (shipped in
 releases v2.2.1 through v2.6.0 for ~4 months).
 
-This test drives the accumulator past 2**24 with a synthetic all-G contig and
-verifies that GC is computed correctly for fragments beyond the overflow threshold.
+Tests are split into fast (unmarked) and slow (@pytest.mark.slow):
+
+- Fast tests use a tiny 80-bp non-uniform contig to verify dtype, offset
+  arithmetic, and sub-region correctness.  These run in milliseconds and are
+  never skipped by -m "not slow".
+- The slow test drives the accumulator past 2**24 with a synthetic ~16.8M-base
+  contig and verifies GC for fragments beyond the overflow threshold.
+  It requires ~627 MB RSS.
 """
 
 import os
@@ -22,82 +28,217 @@ import pytest
 
 from fragments_h5.fragment import get_g_or_c_cumsum
 
+# ---------------------------------------------------------------------------
+# Constants for the overflow (slow) test
+# ---------------------------------------------------------------------------
+
 # 2**24 = 16_777_216.  In an all-GC sequence every base increments the
 # accumulator, so we need at least 2**24 + 1 bases to cross the threshold.
-# We add a small margin (100 bases) to place test fragments past the boundary.
 OVERFLOW_THRESHOLD = 2**24  # 16_777_216
 MARGIN = 100
 CONTIG_LENGTH = OVERFLOW_THRESHOLD + MARGIN  # 16_777_316
 
+# A short run of non-GC bases past the overflow boundary makes the test
+# offset-aware.  With an all-G contig, cumsum[i] == i, so a constant-offset
+# indexing error is invisible: cumsum[stop-k] - cumsum[start-k] == stop-start
+# for any k.  The A-patch creates a fragment whose expected GC is a specific
+# fraction != 1.0 that a broken index cannot accidentally produce.
+A_PATCH_START = OVERFLOW_THRESHOLD + 50
+A_PATCH_LENGTH = 20  # A-patch covers [A_PATCH_START, A_PATCH_START + 20)
+
+
+# ---------------------------------------------------------------------------
+# Helpers and fixtures
+# ---------------------------------------------------------------------------
+
+def _write_fasta(path, name, seq):
+    """Write a single-contig FASTA and index it."""
+    with open(path, "w") as f:
+        f.write(f">{name}\n")
+        for i in range(0, len(seq), 80):
+            f.write(seq[i : i + 80] + "\n")
+    pysam.faidx(path)
+
 
 @pytest.fixture(scope="module")
 def overflow_fasta():
-    """Create a temporary FASTA with a single all-G contig."""
+    """A mostly-G contig crossing the float32 overflow boundary.
+
+    All G except for A_PATCH_LENGTH A's starting at A_PATCH_START.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         fasta_path = os.path.join(tmpdir, "overflow_test.fa")
-        with open(fasta_path, "w") as f:
-            f.write(">chrTest\n")
-            seq = "G" * CONTIG_LENGTH
-            # Write in 80-char lines per FASTA convention
-            for i in range(0, len(seq), 80):
-                f.write(seq[i : i + 80] + "\n")
-
-        # Index the FASTA for pysam
-        pysam.faidx(fasta_path)
+        seq = (
+            "G" * A_PATCH_START
+            + "A" * A_PATCH_LENGTH
+            + "G" * (CONTIG_LENGTH - A_PATCH_START - A_PATCH_LENGTH)
+        )
+        _write_fasta(fasta_path, "chrTest", seq)
         yield fasta_path
 
 
-@pytest.mark.slow
-def test_gc_cumsum_no_float32_overflow(overflow_fasta):
-    """GC must be correct for fragments past the float32 overflow threshold.
+@pytest.fixture(scope="module")
+def tiny_fasta():
+    """A small non-uniform contig for fast tests: G*30 + A*20 + G*30 (80 bp)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fasta_path = os.path.join(tmpdir, "tiny_test.fa")
+        _write_fasta(fasta_path, "chrTiny", "G" * 30 + "A" * 20 + "G" * 30)
+        yield fasta_path
 
-    With an all-G contig, every fragment should have GC = 1.0 regardless of
-    position.  The buggy float32 accumulator would yield GC = 0.0 for any
-    fragment starting at or past base 16,777,216.
+
+# ---------------------------------------------------------------------------
+# Fast tests (unmarked — always run, even with -m "not slow")
+# ---------------------------------------------------------------------------
+
+def test_gc_cumsum_dtype_is_float64(tiny_fasta):
+    """Cumsum dtype must be float64, not float32.
+
+    This is a cheap early-warning against reintroduction of the float32
+    accumulator, but it is NOT sufficient alone: a refactor to
+    .cumsum().astype(numpy.float64) (accumulate in float32, then cast)
+    would pass this check while producing fully saturated garbage past
+    2**24 bases.  See test_gc_cumsum_no_float32_overflow for the true
+    regression guard.
     """
-    g_or_c_cumsum, offset = get_g_or_c_cumsum(overflow_fasta, "chrTest")
-    assert offset == 0
-
-    # The cumsum array includes a leading pad base ('a'), so its length is
-    # CONTIG_LENGTH + 1.
-    assert len(g_or_c_cumsum) == CONTIG_LENGTH + 1
-
-    # --- Verify dtype is float64 (cheap guard against reintroduction) ---
+    g_or_c_cumsum, _ = get_g_or_c_cumsum(tiny_fasta, "chrTiny")
     assert g_or_c_cumsum.dtype == np.float64, (
         f"Expected float64 cumsum but got {g_or_c_cumsum.dtype}; "
         "float32 overflows at 2**24 G/C bases"
     )
 
-    # --- Behavioral test: GC fraction for fragments past the threshold ---
-    # Test several fragments straddling and past the overflow boundary.
-    # For an all-G contig, cumsum[stop] - cumsum[start] should equal
-    # (stop - start) exactly, giving GC = 1.0.
-    test_fragments = [
-        # (start, stop) — genomic coordinates
-        (0, 200),                                          # beginning
-        (OVERFLOW_THRESHOLD - 200, OVERFLOW_THRESHOLD),    # just before threshold
-        (OVERFLOW_THRESHOLD, OVERFLOW_THRESHOLD + 50),     # right at threshold
-        (OVERFLOW_THRESHOLD + 10, OVERFLOW_THRESHOLD + 60),  # past threshold
-        (CONTIG_LENGTH - 50, CONTIG_LENGTH),               # end of contig
-    ]
 
+def test_gc_cumsum_correctness_nonuniform(tiny_fasta):
+    """GC fractions must be correct on a non-uniform contig.
+
+    An all-G contig has cumsum[i] == i, making cumsum[stop] - cumsum[start]
+    equal stop - start regardless of any constant offset error.  This
+    non-uniform contig (G*30 + A*20 + G*30) catches such indexing bugs.
+
+    All comparisons use abs=0 (exact equality) because the cumsum contains
+    integer-valued float64s and the divisions produce exact results for
+    these specific fractions.
+    """
+    g_or_c_cumsum, offset = get_g_or_c_cumsum(tiny_fasta, "chrTiny")
+    assert offset == 0
+    assert len(g_or_c_cumsum) == 81  # 80 bases + 1 leading pad
+
+    # Fragment in first G-run: [0, 10) -> GC = 10/10 = 1.0
+    gc = (g_or_c_cumsum[10] - g_or_c_cumsum[0]) / 10
+    assert gc == pytest.approx(1.0, abs=0), f"All-G fragment: expected 1.0, got {gc}"
+
+    # Fragment in A-run: [30, 50) -> GC = 0/20 = 0.0
+    gc = (g_or_c_cumsum[50] - g_or_c_cumsum[30]) / 20
+    assert gc == pytest.approx(0.0, abs=0), f"All-A fragment: expected 0.0, got {gc}"
+
+    # Spanning G->A boundary: [20, 40) -> 10G + 10A -> GC = 10/20 = 0.5
+    gc = (g_or_c_cumsum[40] - g_or_c_cumsum[20]) / 20
+    assert gc == pytest.approx(0.5, abs=0), f"Boundary fragment: expected 0.5, got {gc}"
+
+    # Whole contig: [0, 80) -> 60G + 20A -> GC = 60/80 = 0.75
+    gc = (g_or_c_cumsum[80] - g_or_c_cumsum[0]) / 80
+    assert gc == pytest.approx(0.75, abs=0), f"Whole contig: expected 0.75, got {gc}"
+
+
+def test_gc_cumsum_subregion_offset(tiny_fasta):
+    """Sub-region queries must agree with whole-contig queries for the same fragment.
+
+    get_g_or_c_cumsum(region_start, region_stop) returns a shorter cumsum and
+    an offset; callers subtract the offset from genomic coordinates:
+        gc = (cumsum[stop - offset] - cumsum[start - offset]) / length
+
+    The original bug report wrongly blamed this code path for the GC corruption,
+    so pinning its correctness has diagnostic value beyond regression safety.
+    """
+    full_cumsum, full_offset = get_g_or_c_cumsum(tiny_fasta, "chrTiny")
+    assert full_offset == 0
+
+    # Sub-region covering bases [20, 60) — spans both G/A boundaries
+    region_start, region_stop = 20, 60
+    sub_cumsum, sub_offset = get_g_or_c_cumsum(
+        tiny_fasta, "chrTiny",
+        region_start=region_start, region_stop=region_stop,
+    )
+    assert sub_offset == region_start
+
+    test_fragments = [
+        (20, 40),  # 10G + 10A -> GC = 0.5
+        (30, 50),  # 20A -> GC = 0.0
+        (40, 60),  # 10A + 10G -> GC = 0.5
+        (25, 55),  # 5G + 20A + 5G -> GC = 10/30
+    ]
     for frag_start, frag_stop in test_fragments:
+        frag_len = frag_stop - frag_start
+        gc_full = (full_cumsum[frag_stop] - full_cumsum[frag_start]) / frag_len
+        gc_sub = (
+            sub_cumsum[frag_stop - sub_offset]
+            - sub_cumsum[frag_start - sub_offset]
+        ) / frag_len
+        # Integer-valued float64 cumsum — exact equality is appropriate
+        assert gc_sub == pytest.approx(gc_full, abs=0), (
+            f"Fragment [{frag_start}, {frag_stop}): "
+            f"whole-contig GC={gc_full}, sub-region GC={gc_sub}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Slow test (requires ~627 MB RSS)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_gc_cumsum_no_float32_overflow(overflow_fasta):
+    """GC must be correct for fragments past the float32 overflow threshold.
+
+    Drives the accumulator past 2**24 with a synthetic ~16.8M-base contig.
+    Requires ~627 MB RSS.
+
+    The contig is all-G except for a short A-patch past the overflow boundary,
+    making the test offset-aware: a constant-offset indexing error would
+    produce the wrong GC for the A-patch fragment.
+
+    Why this behavioral test is load-bearing and must not be deleted:
+    A refactor to .cumsum().astype(numpy.float64) (accumulate in float32,
+    cast afterward) leaves dtype == float64, passing the dtype check, while
+    producing fully saturated garbage past 2**24 bases.  The dtype check is
+    a cheap proxy that a one-line reordering defeats.  This test is the true
+    regression guard against float32 overflow.
+    """
+    g_or_c_cumsum, offset = get_g_or_c_cumsum(overflow_fasta, "chrTest")
+    assert offset == 0
+    assert len(g_or_c_cumsum) == CONTIG_LENGTH + 1
+
+    # --- Fragments in all-G regions ---
+    all_g_fragments = [
+        (0, 200),                                        # beginning
+        (OVERFLOW_THRESHOLD - 200, OVERFLOW_THRESHOLD),  # just before threshold
+        (OVERFLOW_THRESHOLD, OVERFLOW_THRESHOLD + 50),   # at threshold, before A-patch
+        (A_PATCH_START + A_PATCH_LENGTH, CONTIG_LENGTH),  # after A-patch to end
+    ]
+    for frag_start, frag_stop in all_g_fragments:
         frag_len = frag_stop - frag_start
         gc_count = g_or_c_cumsum[frag_stop] - g_or_c_cumsum[frag_start]
         gc_fraction = gc_count / frag_len
-
-        assert gc_fraction == pytest.approx(1.0, abs=1e-9), (
-            f"Fragment [{frag_start}, {frag_stop}) (len={frag_len}): "
-            f"expected GC=1.0 but got {gc_fraction:.10f} "
-            f"(gc_count={gc_count}, cumsum[stop]={g_or_c_cumsum[frag_stop]}, "
-            f"cumsum[start]={g_or_c_cumsum[frag_start]})"
+        assert gc_fraction == pytest.approx(1.0, abs=0), (
+            f"All-G fragment [{frag_start}, {frag_stop}): "
+            f"expected GC=1.0 but got {gc_fraction:.10f}"
         )
 
-    # --- Verify the accumulator value at the end is exact ---
-    # For an all-G sequence of length L, cumsum[-1] should be exactly L
-    # (the pad 'a' contributes 0 to G/C).  A float32 accumulator would
-    # stick at 16777216.
-    assert g_or_c_cumsum[-1] == pytest.approx(CONTIG_LENGTH, abs=0), (
-        f"Final cumsum value should be {CONTIG_LENGTH} but got "
+    # --- Offset-aware fragment spanning the A-patch ---
+    # [A_PATCH_START - 10, A_PATCH_START + A_PATCH_LENGTH + 10):
+    #   10 G + 20 A + 10 G = 40 bases, 20 G/C -> expected GC = 0.5
+    patch_start = A_PATCH_START - 10
+    patch_stop = A_PATCH_START + A_PATCH_LENGTH + 10
+    patch_len = patch_stop - patch_start  # 40
+    gc_count = g_or_c_cumsum[patch_stop] - g_or_c_cumsum[patch_start]
+    gc_fraction = gc_count / patch_len
+    assert gc_fraction == pytest.approx(0.5, abs=0), (
+        f"A-patch fragment [{patch_start}, {patch_stop}) (len={patch_len}): "
+        f"expected GC=0.5 but got {gc_fraction:.10f} — offset-aware check failed"
+    )
+
+    # --- Final accumulator value ---
+    # Total G/C bases = CONTIG_LENGTH - A_PATCH_LENGTH (A's are not G/C)
+    expected_total = CONTIG_LENGTH - A_PATCH_LENGTH
+    assert g_or_c_cumsum[-1] == pytest.approx(expected_total, abs=0), (
+        f"Final cumsum should be {expected_total} but got "
         f"{g_or_c_cumsum[-1]} (stuck at 2**24 = {2**24}?)"
     )
