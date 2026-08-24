@@ -1119,6 +1119,21 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 - **Test coverage:** First CLI-level tests in this repo; SE filter gate at `fragments_h5.py:782` now has mutation-verified test coverage.
 - **Pre-existing fix:** `--read-methyl` help text corrected from "YN tag" to "YM tag" (code always read "YM").
 
+**Correction (added 2026-08-24):** The merge commit for this release (`aa753c7`)
+claimed the `build_se_fragment_h5s.nf` container "has neither" flag and that
+`errorStrategy 'ignore'` made the resulting argparse failure silent, so
+"those samples simply produced no h5." Both claims are false, per direct
+measurement: `ghcr.io/nboley/fragments-h5:2.10.1` (the image) has both flags —
+it was built from a tree ahead of the `v2.10.1` git tag, which lacks them —
+and all 48 expected h5 files for the affected project exist in S3, built
+successfully. Also, `build_se_fragment_h5s.config`'s `standard` profile sets
+`errorStrategy = 'terminate'` (loud); only the `remote` profile retries twice
+then falls back to `'ignore'`. Recurring lesson for this repo: a git tag is
+not evidence of what a container contains — verify by running the image, not
+by reading the tag it was built from. What was correct: the CLI flags were
+genuinely unreachable from `main.py` before this release, and exposing them
+was the right fix.
+
 ### v2.8.0 Changelog
 - **Chunk-based parallelization:** Contigs split into 10M-base chunks for balanced multiprocessing load. Eliminates bottleneck where large contigs (e.g., chr1 ~249M) serialize work.
 - **Float64 GC cumsum:** GC content cumulative sum uses float64 instead of float32, fixing precision loss on large chromosomes.
