@@ -16,7 +16,7 @@ Tests are split into fast (unmarked) and slow (@pytest.mark.slow):
   never skipped by -m "not slow".
 - The slow test drives the accumulator past 2**24 with a synthetic ~16.8M-base
   contig and verifies GC for fragments beyond the overflow threshold.
-  It requires ~627 MB RSS.
+  It requires ~676 MB RSS.
 """
 
 import os
@@ -38,11 +38,15 @@ OVERFLOW_THRESHOLD = 2**24  # 16_777_216
 MARGIN = 100
 CONTIG_LENGTH = OVERFLOW_THRESHOLD + MARGIN  # 16_777_316
 
-# A short run of non-GC bases past the overflow boundary makes the test
-# offset-aware.  With an all-G contig, cumsum[i] == i, so a constant-offset
-# indexing error is invisible: cumsum[stop-k] - cumsum[start-k] == stop-start
-# for any k.  The A-patch creates a fragment whose expected GC is a specific
-# fraction != 1.0 that a broken index cannot accidentally produce.
+# A short run of non-GC bases past the overflow boundary.  With an all-G
+# contig, cumsum[i] == i, so a constant-offset indexing error is invisible:
+# cumsum[stop-k] - cumsum[start-k] == stop-start for any k.  The A-patch
+# breaks that invariance.
+#
+# Note the patch only defeats an offset error for fragments whose *endpoint*
+# cuts through it.  A fragment that fully contains the patch still counts the
+# same 20 non-G/C bases after a small shift, so it is NOT offset-sensitive.
+# Both cases are asserted below, for different reasons.
 A_PATCH_START = OVERFLOW_THRESHOLD + 50
 A_PATCH_LENGTH = 20  # A-patch covers [A_PATCH_START, A_PATCH_START + 20)
 
@@ -181,7 +185,7 @@ def test_gc_cumsum_subregion_offset(tiny_fasta):
 
 
 # ---------------------------------------------------------------------------
-# Slow test (requires ~627 MB RSS)
+# Slow test (requires ~676 MB RSS)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.slow
@@ -189,7 +193,7 @@ def test_gc_cumsum_no_float32_overflow(overflow_fasta):
     """GC must be correct for fragments past the float32 overflow threshold.
 
     Drives the accumulator past 2**24 with a synthetic ~16.8M-base contig.
-    Requires ~627 MB RSS.
+    Requires ~676 MB RSS.
 
     The contig is all-G except for a short A-patch past the overflow boundary,
     making the test offset-aware: a constant-offset indexing error would
@@ -222,17 +226,34 @@ def test_gc_cumsum_no_float32_overflow(overflow_fasta):
             f"expected GC=1.0 but got {gc_fraction:.10f}"
         )
 
-    # --- Offset-aware fragment spanning the A-patch ---
+    # --- Fragment fully containing the A-patch ---
     # [A_PATCH_START - 10, A_PATCH_START + A_PATCH_LENGTH + 10):
     #   10 G + 20 A + 10 G = 40 bases, 20 G/C -> expected GC = 0.5
+    # This confirms non-G/C bases are still correctly excluded past 2**24 (a
+    # saturated accumulator yields 0.0).  It is deliberately NOT an offset
+    # check: shifting the window by <=10 keeps all 20 A's inside it, so the
+    # count is unchanged.
     patch_start = A_PATCH_START - 10
     patch_stop = A_PATCH_START + A_PATCH_LENGTH + 10
     patch_len = patch_stop - patch_start  # 40
-    gc_count = g_or_c_cumsum[patch_stop] - g_or_c_cumsum[patch_start]
-    gc_fraction = gc_count / patch_len
+    gc_fraction = (g_or_c_cumsum[patch_stop] - g_or_c_cumsum[patch_start]) / patch_len
     assert gc_fraction == pytest.approx(0.5, abs=0), (
-        f"A-patch fragment [{patch_start}, {patch_stop}) (len={patch_len}): "
-        f"expected GC=0.5 but got {gc_fraction:.10f} — offset-aware check failed"
+        f"Patch-containing fragment [{patch_start}, {patch_stop}) (len={patch_len}): "
+        f"expected GC=0.5 but got {gc_fraction:.10f}"
+    )
+
+    # --- Offset-sensitive fragment whose start cuts through the A-patch ---
+    # [A_PATCH_START + 10, A_PATCH_START + 50) = [.., CONTIG_LENGTH):
+    #   10 A + 30 G = 40 bases, 30 G/C -> expected GC = 0.75
+    # A one-base index shift gives 11 A + 29 G = 0.725, so this assertion
+    # fails on any constant-offset error past the overflow boundary.
+    cut_start = A_PATCH_START + 10
+    cut_stop = A_PATCH_START + 50  # == CONTIG_LENGTH
+    cut_len = cut_stop - cut_start  # 40
+    gc_fraction = (g_or_c_cumsum[cut_stop] - g_or_c_cumsum[cut_start]) / cut_len
+    assert gc_fraction == pytest.approx(0.75, abs=0), (
+        f"Patch-cutting fragment [{cut_start}, {cut_stop}) (len={cut_len}): "
+        f"expected GC=0.75 but got {gc_fraction:.10f} — offset check failed"
     )
 
     # --- Final accumulator value ---
