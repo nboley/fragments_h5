@@ -78,7 +78,8 @@ Three regions, not two:
 | `>= 2**24` | past ~40.45 Mb | fully saturated; `+1.0` is a no-op |
 
 This distinction is load-bearing twice: §7.2 uses 2**23 as its oracle bound, and §5b/§7.3 must
-*permit* small corrections in the middle band rather than treating them as hard errors (§5b).
+*permit* middle-band corrections on N-containing spans rather than treating them as hard errors.
+Those corrections are **few but not small** — see §5b.
 
 **This is why "repair only the values that look broken" is wrong.** The spanning fragments are the
 minority but they are the ones a `gc == 0` filter misses. The tool recomputes *everything*
@@ -476,9 +477,10 @@ assumption about the reference.**
 | R7 | The three Stage A sites compute the same thing | **DISCHARGED from source.** `fragment.py:496`, `:606`, `:739-743` are arithmetically identical: same expression, same `g_or_c_cumsum is None or frag_stop == frag_start → None` guard, same `gc_offset` subtraction. The only difference is line wrapping. | Nothing further needed. It does not matter which of the three built a given file. |
 
 The honest summary: **the arithmetic is now settled by measurement** — a measured alphabet, an exact
-float32 pairwise add, and a float64 margin of ~4×10^7. **The reference identity is not settled, and
-that is the real risk**, with the important caveat that §7.2 constrains the reference only over the
-prefix that was never corrupted.
+float32 pairwise add, and a float64 margin of ~4×10^7. **Reference identity is half settled**: the
+two-reference question R1(a) is decided per file by §7.2.1's byte-diff, while R1(b), arbitrary drift
+of the REF-P12 object, has no possible oracle and remains the real residual risk — §7.2 constrains
+it only over the prefix that was never corrupted.
 
 ---
 
@@ -551,7 +553,7 @@ general — it checks *every* contig instead of five. The prototype's value was 
 probe; the repair tool has the file locally and can do better.
 
 Confidence: **high** that these layers prevent the wrong-FASTA accident. They do not by themselves
-prove the *right* FASTA (that is R1 / §7.2).
+prove the *right* FASTA (that is R1 / §7.2 / §7.2.1).
 
 ### 5b. The no-op guard as a safety property
 
@@ -836,7 +838,7 @@ convenient source of additional pre-fix (corrupted) test subjects that are *not*
 218, if we want a rehearsal target we are willing to break. Recommended: rehearse the full
 apply path end-to-end on one of these, in a scratch bucket prefix, before touching the 218.
 
-### 7.2 Pre-saturation prefix agreement (the strongest available check on R1 — but see its limits)
+### 7.2 Pre-saturation prefix agreement (the only available check on R1(b) — and see its limits)
 
 The corrupted files are corrupt only *past* the saturation point. **Everything before it is
 correct**, and it was produced by the exact FASTA bytes used on 2025-11-24. That gives us a
@@ -861,7 +863,7 @@ sits on no half-integer grid, so a handful of such bases destroys exactness imme
 oracle would cover nothing at all. That is why §5 layer 5 is a gate and not a log line.
 
 This check:
-- **strongly corroborates reference identity (R1)** against the 2025-11-24 build, on the real
+- **strongly corroborates reference identity (R1(b))** against the 2025-11-24 build, on the real
   target files, which the §7.1 clean replay cannot do (its subjects were built 2026-05-22, six
   months on the wrong side);
 - simultaneously validates the coordinate convention, the `'a'` pad offset, Stage A rounding and
@@ -976,7 +978,7 @@ previous version of this list did not distinguish them — "the GC histogram loo
 
 | Stage | Target | Gate to proceed |
 |---|---|---|
-| 0 | Unit + regression tests, incl. a new "overwrite a dataset in `r+`" test, the §3.5 rounding-agreement test over >=10^7 fragments, and a §6.5 write-once-backup test; the existing overflow regression test at `8820299` (`tests/test_gc_cumsum_overflow.py`, ~676 MB RSS) must still pass | green CI |
+| 0 | Unit + regression tests, incl. a new "overwrite a dataset in `r+`" test, the §3.5 rounding-agreement test over >=10^7 fragments, a §6.5 write-once-backup test, a §6.6 refuse-to-start test (mismatched ledger header, differing `backup_uri` root, populated-prefix-with-empty-ledger), and a §5b float32-accumulator-simulation test asserting the simulated band boundary lands where the pre-fix code saturates; the existing overflow regression test at `8820299` (`tests/test_gc_cumsum_overflow.py`, ~676 MB RSS) must still pass | green CI |
 | 1 | `--dry-run` clean replay on the 5 §7.1 targets | §7.1 criteria, all zeros |
 | 2 | Full `--apply` rehearsal on **one pre-fix file from `output_rebuild_frag_h5s/`**, written to a **scratch prefix**, not over the original | §7.3 blocking checks all pass; file-size advisory reviewed; backup/restore round-trip exercised; first real runtime datum recorded (§3.4) |
 | 3 | `--dry-run` §7.2 pre-saturation gate across **all 218**, incl. the §7.2.1 two-reference byte-diff report | 218/218 pass the prefix oracle; every file with a nonzero REF-P12/REF-ASSETS byte-diff named, quantified, and accepted by a human |
@@ -1119,8 +1121,9 @@ not a restore path, so the manual `boto3` procedure has to be written down and r
 shipping a second implementation of those ten lines inside the tool adds a code path that is
 exercised only in an emergency. Ship the runbook; the runbook is the tested artifact.
 
-Because backup keys mirror original keys under one dated root (§6.1), the restore is a mechanical
-prefix swap, and the ledger supplies both the key list and the expected hashes. §7.4 stage 2
+Because backup keys mirror original keys under one pinned root (§6.1, §6.6), the restore is a
+mechanical prefix swap, and the ledger — whose header names that root — supplies the root, the key
+list and the expected hashes. §7.4 stage 2
 rehearses it end-to-end and stage 7 spot-checks it on 3 files.
 
 Backups are retained until §7.4 stage 7 completes and the cohort owners have re-run at least one
@@ -1481,7 +1484,7 @@ kind of overclaim this section exists to prevent.
 | H1 | §4.2 misread `fragment.py:442` | Corrected: `.sum(axis=1)` runs in **float32** before the `.astype(numpy.float64)`; only the cumsum is float64. Discharged explicitly — the pairwise add is `0+0`, `0+1.0`, or `0.25+0.25`, all float32-exact. |
 | H2 | The "multiple of 2**-25" lemma is false | Lemma deleted entirely. Replaced by the measured enumeration `{0, 0.5, 1.0}` and the 2**52 float64 bound. The general `sequence.pyx` table is retained in §4.1 solely to motivate the §5 layer-5 gate. |
 | H3 | B/V/H/D presence — resolved by measurement | §4.2 now leads with the histogram and its provenance; states that B/V/H/D would have made the usable prefix **zero**, not merely shorter; and converts the check into a mandatory preflight gate (§5 layer 5) that refuses to run on any non-`{A,C,G,T,N}` sequence byte. Moved out of §12. |
-| H4 | §7.2 proves prefix identity, not reference identity | R1 row downgraded from "Decisive" to "strong corroboration; does not cover the repaired region". §13 no longer calls it decisive. New §7.2.1 states the limit explicitly and adds the per-contig N-block coverage check across the 18 disagreeing contigs, blocking at §7.4 stage 3. §8.5 and §12.1 updated to match. |
+| H4 | §7.2 proves prefix identity, not reference identity | R1 row downgraded from "Decisive" to "strong corroboration; does not cover the repaired region". §13 no longer calls it decisive. New §7.2.1 states the limit explicitly and adds the per-contig N-block coverage check across the 18 disagreeing contigs, blocking at §7.4 stage 3. §8.5 and §12.1 updated to match. **Superseded in round 2 by H-A** — the N-block coverage check was unsound and has been replaced by a two-reference byte-diff. |
 | H5 | Sampled backup verification | Sampling fallback deleted from §6.3. If the checksum path is unavailable, re-download and hash **all** backups. There is no sampled mode. |
 | H6 | Upload has the multipart-ETag problem | §6.4 now mandates single-part `put_object` with `ChecksumAlgorithm="SHA256"`, forbids `upload_file` by name and threshold, requires asserting no `-N` suffix on the returned checksum, and names `ChecksumType=FULL_OBJECT` as the only acceptable multipart form. §3.3 updated. |
 | H7 | Vectorization / rounding fidelity | New §3.5: `numpy.round(a,5)` ≠ CPython `round(x,5)`; decision is to reproduce CPython semantics, preferring the elementwise path unless benchmarking forbids it; blocking test asserting elementwise agreement over >=10^7 real fragments plus engineered near-`k+0.5` values. Added to §7.4 stage 0. |
