@@ -379,6 +379,51 @@ def cumsum_cache(tiny_fasta):
         yield cache_dir, fasta_sha256
 
 
+# A contig that lives in the H5 but not in the FASTA. Real files carry ~165 of
+# these (unplaced/unlocalised scaffolds) because the BAM header lists contigs
+# the GC reference does not. Both dimensions are deliberately under the index
+# thresholds — length < INDEX_BLOCK_SIZE and n < MIN_NUM_READS_FOR_INDEX — so
+# the contig never carries an index and the index key-set check is unaffected.
+SCAFFOLD_NAME = "chrUn_scaffold99"
+SCAFFOLD_LEN = 3000
+SCAFFOLD_N_FRAGS = 40
+
+
+def _scaffold_contig(n_non_255=0):
+    """Fragments on a FASTA-absent contig; gc is 255 ('no reference') by default."""
+    starts = np.sort(
+        np.random.RandomState(300).randint(0, SCAFFOLD_LEN - 300, SCAFFOLD_N_FRAGS)
+    ).astype("int32")
+    lengths = np.random.RandomState(301).randint(
+        10, 200, SCAFFOLD_N_FRAGS
+    ).astype("uint16")
+    gc = np.full(SCAFFOLD_N_FRAGS, 255, dtype="uint8")
+    gc[:n_non_255] = 128
+    return {"starts": starts, "lengths": lengths, "gc": gc}
+
+
+@pytest.fixture
+def absent_contig_h5(tiny_fasta):
+    """Factory building a fragment H5 whose FASTA lacks one of its contigs."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        counter = [0]
+
+        def build(n_non_255=0):
+            contigs = _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45))
+            contigs[SCAFFOLD_NAME] = _scaffold_contig(n_non_255=n_non_255)
+            counter[0] += 1
+            path = os.path.join(tmpdir, f"absent_{counter[0]}.h5")
+            _make_fragment_h5(
+                path, contigs,
+                contig_lengths=dict(
+                    FIXTURE_CONTIG_LENGTHS, **{SCAFFOLD_NAME: SCAFFOLD_LEN}
+                ),
+            )
+            return path
+
+        yield build
+
+
 # ---------------------------------------------------------------------------
 # GC correctness against the independent oracle (review finding H-1)
 # ---------------------------------------------------------------------------
@@ -896,6 +941,38 @@ class TestDetectPaddingRow:
                 with pytest.raises(RepairAbort, match="exactly one"):
                     detect_padding_row(f, "chr1")
 
+    def test_abort_on_zero_signature_without_sortedness_violation(self):
+        """The other single-condition case: cond_b holds but cond_a does not.
+
+        cond_a is `starts[-1] < starts[-2]`, and the phantom row's start is 0,
+        so cond_a can only fail when the preceding start is also 0. That is what
+        this builds: a real fragment at position 0 followed by an all-zero row.
+        The zero signature fires, the sortedness check cannot, and the file must
+        go to human review rather than being silently truncated.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "test.h5")
+            with h5py.File(h5_path, "w") as f:
+                f.create_group("data")
+                f.create_group("index")
+                f.attrs["index_block_size"] = 5000
+                f.attrs["max_fragment_length"] = 65535
+                f.attrs["_contig_lengths_str"] = str({"chr1": 1000})
+                f.attrs["_bam_header"] = ""
+                f.attrs["_source_format"] = "BAM"
+
+                grp = f.create_group("data/chr1")
+                grp.create_dataset("starts", data=np.array([0, 0], dtype="int32"))
+                grp.create_dataset("lengths", data=np.array([30, 0], dtype="uint16"))
+                grp.create_dataset("mapq", data=np.array([[60, 60], [0, 0]], dtype="uint8"))
+                grp.create_dataset("gc", data=np.array([100, 0], dtype="uint8"))
+                grp.create_dataset("strand", data=np.array([b"+", b""], dtype="|S1"))
+                f["fragment_length_counts"] = np.zeros(65536)
+
+            with h5py.File(h5_path, "r") as f:
+                with pytest.raises(RepairAbort, match="cond_a=False, cond_b=True"):
+                    detect_padding_row(f, "chr1")
+
     def test_single_fragment_is_clean(self):
         """A contig with n=1 (< 2) is always clean."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1193,8 +1270,11 @@ FRAG_LEN = 10
 def _region_inputs(regions, n_flags=None):
     """Build (starts, lengths, f32_cumsum, n_prefix) placing each fragment in a region.
 
-    regions: sequence of 'below' | 'middle' | 'above' — the float32 cumsum band
-        that fragment i's stop coordinate lands in.
+    regions: sequence of 'below' | 'at_T23' | 'middle' | 'at_T24' | 'above' —
+        the float32 cumsum band that fragment i's stop coordinate lands in.
+        The two 'at_' values sit exactly on a threshold; both 2**23 and 2**24
+        are exactly representable in float32, so the comparison really is an
+        equality and the choice of < vs <= is observable.
     n_flags: optional sequence of bool — whether fragment i's span contains an N.
 
     f32_cumsum and n_prefix are constructed directly rather than derived from a
@@ -1208,7 +1288,9 @@ def _region_inputs(regions, n_flags=None):
 
     band_value = {
         "below": np.float32(T23 - 1000.0),
+        "at_T23": np.float32(T23),
         "middle": np.float32(T23 + 1000.0),
+        "at_T24": np.float32(T24),
         "above": np.float32(T24 + 1000.0),
     }
     f32_cumsum = np.zeros(size, dtype=np.float32)
@@ -1360,6 +1442,59 @@ class TestRegionClassification:
         )
         assert stats["other_to_x255"] == 1
         assert any("x→255" in v for v in violations), violations
+
+    # -- exact threshold equality (audit finding F4) ------------------------
+    #
+    # Both bands are half-open: below is `< T23`, middle is `>= T23 & < T24`.
+    # A fragment landing exactly on a threshold is the only input that can tell
+    # `<` from `<=`, and neither threshold needs a 16 Mb contig to reach here
+    # because _region_inputs writes the float32 cumsum directly.
+
+    def test_exactly_t23_is_middle_band_not_below(self):
+        """f32_at_stop == T23 belongs to the middle band, not the below band.
+
+        With `below_t23` widened to `<=`, this fragment lands in both bands and
+        its change is reported as a pre-saturation violation.
+        """
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(
+            ["at_T23"], n_flags=[True]
+        )
+        assert f32_cumsum[int(starts[0]) + FRAG_LEN] == np.float32(T23)
+
+        old_gc = np.array([100], dtype=np.uint8)
+        new_gc = np.array([101], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert violations == []
+        assert stats["below_T23"] == 0
+        assert stats["between_T23_T24"] == 1
+        assert stats["changed_below_T23"] == 0
+        assert stats["changed_between_T23_T24"] == 1
+
+    def test_exactly_t24_is_above_band_not_middle(self):
+        """f32_at_stop == T24 belongs to the above band, not the middle band.
+
+        With the middle band widened to `<= T24`, this N-free fragment's change
+        is reported as an illegal middle-band change on an N-free span.
+        """
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(
+            ["at_T24"], n_flags=[False]
+        )
+        assert f32_cumsum[int(starts[0]) + FRAG_LEN] == np.float32(T24)
+
+        old_gc = np.array([0], dtype=np.uint8)
+        new_gc = np.array([200], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert violations == []
+        assert stats["between_T23_T24"] == 0
+        assert stats["changed_between_T23_T24"] == 0
+        assert stats["above_T24"] == 1
+        assert stats["changed_above_T24"] == 1
 
 
 class TestCorruptedFileAborts:
@@ -1991,3 +2126,344 @@ class TestFastaRequiredForGcFiles:
         """A file with a gc dataset cannot be repaired without --fasta."""
         with pytest.raises(RepairAbort, match="--fasta not provided"):
             repair_local_file(local_path=clean_h5, fasta_path=None, dry_run=True)
+
+
+# ---------------------------------------------------------------------------
+# Contigs present in the H5 but absent from the FASTA (audit finding F2)
+#
+# This branch runs on ~165 scaffold contigs in every one of the 218 production
+# files, and it is a §5 layer-3 wrong-reference defence: if the operator hands
+# the tool a reference that is merely *different* rather than obviously wrong,
+# the contigs it does not contain are exactly where that shows up. Both
+# directions matter — skipping the genuinely unreferenced ones, and refusing
+# to skip one that carries real GC data.
+# ---------------------------------------------------------------------------
+
+class TestContigAbsentFromFasta:
+    """The `contig not in fasta_ref.references` branch, both directions."""
+
+    def test_absent_contig_with_all_255_gc_is_skipped(
+        self, absent_contig_h5, tiny_fasta, cumsum_cache,
+    ):
+        """gc == 255 everywhere means 'no reference for this contig' — skip it."""
+        cache_dir, fasta_sha256 = cumsum_cache
+        h5_path = absent_contig_h5()
+
+        report = repair_local_file(
+            local_path=h5_path,
+            fasta_path=tiny_fasta,
+            cumsum_cache_dir=cache_dir,
+            fasta_sha256=fasta_sha256,
+            dry_run=True,
+        )
+
+        assert report["status"] == "dry_run_ok"
+        res = report["gc_results"][SCAFFOLD_NAME]
+        assert res["action"] == "skipped_absent"
+        assert res["violations"] == []
+        assert res["stats"] == {"total_frags": SCAFFOLD_N_FRAGS, "all_255": True}
+
+        # The FASTA-backed contigs still went down the recompute path, so the
+        # skip is contig-scoped rather than a whole-file bail-out.
+        for contig in ("chr1", "chr2"):
+            assert report["gc_results"][contig]["action"] == "recomputed"
+
+    def test_absent_contig_gc_untouched_by_apply(
+        self, absent_contig_h5, tiny_fasta, cumsum_cache, expected_clean_gc,
+    ):
+        """--apply must not rewrite the skipped contig's gc, and must succeed."""
+        cache_dir, fasta_sha256 = cumsum_cache
+        h5_path = absent_contig_h5()
+
+        with h5py.File(h5_path, "r") as f:
+            before = f[f"data/{SCAFFOLD_NAME}/gc"][:]
+
+        report = repair_local_file(
+            local_path=h5_path,
+            fasta_path=tiny_fasta,
+            cumsum_cache_dir=cache_dir,
+            fasta_sha256=fasta_sha256,
+            dry_run=False,
+        )
+        assert report["status"] == "ok"
+
+        with h5py.File(h5_path, "r") as f:
+            after = f[f"data/{SCAFFOLD_NAME}/gc"][:]
+            assert np.array_equal(after, before)
+            assert np.all(after == 255)
+            # ... while the referenced contigs still match the oracle
+            for contig in ("chr1", "chr2"):
+                assert np.array_equal(
+                    f[f"data/{contig}/gc"][:], expected_clean_gc[contig]
+                )
+
+    def test_absent_contig_with_non_255_gc_aborts(
+        self, absent_contig_h5, tiny_fasta, cumsum_cache,
+    ):
+        """Real GC bytes on a contig the FASTA lacks means the wrong reference."""
+        cache_dir, fasta_sha256 = cumsum_cache
+        h5_path = absent_contig_h5(n_non_255=3)
+
+        with pytest.raises(RepairAbort, match="absent from FASTA but gc has 3 non-255"):
+            repair_local_file(
+                local_path=h5_path,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=True,
+            )
+
+    def test_absent_contig_abort_writes_nothing(
+        self, absent_contig_h5, tiny_fasta, cumsum_cache,
+    ):
+        """The abort fires during analysis, before --apply touches the file."""
+        cache_dir, fasta_sha256 = cumsum_cache
+        h5_path = absent_contig_h5(n_non_255=1)
+
+        sha_before = compute_file_sha256(h5_path)
+        with pytest.raises(RepairAbort, match="absent from FASTA"):
+            repair_local_file(
+                local_path=h5_path,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=False,
+            )
+        assert compute_file_sha256(h5_path) == sha_before
+
+
+# ---------------------------------------------------------------------------
+# index_block_size comes from the file, not the module (audit finding F1)
+# ---------------------------------------------------------------------------
+
+class TestIndexBlockSizeFromFile:
+    """§3.2.3: the index must be rebuilt with the block size the file was built with."""
+
+    def test_rebuild_honours_non_default_block_size(self, tiny_fasta, cumsum_cache):
+        """A file written with a non-default block size keeps that geometry.
+
+        INDEX_BLOCK_SIZE has changed over the format's life, so a file's own
+        `index_block_size` attr is the only authority. Rebuilding with the
+        module constant instead would silently reshape the index of every file
+        built under an older value.
+        """
+        cache_dir, fasta_sha256 = cumsum_cache
+        block_size = 10000
+        assert block_size != INDEX_BLOCK_SIZE, "fixture must not use the default"
+        assert CHR1_LEN > block_size and CHR1_LEN > INDEX_BLOCK_SIZE, (
+            "chr1 must get an index under both block sizes, so the test "
+            "discriminates on the index contents rather than its existence"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "block_size.h5")
+            _make_fragment_h5(
+                h5_path,
+                _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45)),
+                index_block_size=block_size,
+                contig_lengths=FIXTURE_CONTIG_LENGTHS,
+            )
+
+            with h5py.File(h5_path, "r") as f:
+                assert int(f.attrs["index_block_size"]) == block_size
+                before = f["index/chr1"][:]
+
+            report = repair_local_file(
+                local_path=h5_path,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=False,
+            )
+            assert report["status"] == "ok"
+
+            with h5py.File(h5_path, "r") as f:
+                after = f["index/chr1"][:]
+                starts = f["data/chr1/starts"][:]
+
+            expected = np.append(
+                np.searchsorted(
+                    starts, np.arange(0, CHR1_LEN, block_size), side="left"
+                ),
+                len(starts),
+            )
+            assert np.array_equal(after, expected), (
+                f"rebuilt index {after} != block-size-{block_size} index {expected}"
+            )
+            assert np.array_equal(after, before), "rebuild changed a correct index"
+
+            # The module default would produce a differently shaped array, which
+            # is what makes this test able to see the difference at all.
+            n_default = len(np.arange(0, CHR1_LEN, INDEX_BLOCK_SIZE)) + 1
+            assert len(after) != n_default, (
+                f"both block sizes give {n_default} entries; fixture cannot discriminate"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Reference geometry gates (audit finding F3)
+#
+# Both are §5 layer-3 defences against being handed the wrong reference: a
+# FASTA whose contig names match but whose coordinates do not.
+# ---------------------------------------------------------------------------
+
+class TestReferenceGeometryGates:
+    """Contig-length agreement and in-bounds fragments are checked before any GC."""
+
+    def test_contig_length_mismatch_aborts(self, tiny_fasta, cumsum_cache):
+        """FASTA contig length != H5 contig_lengths — the references disagree."""
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "wrong_length.h5")
+            _make_fragment_h5(
+                h5_path,
+                _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45)),
+                # Every fragment is still in bounds and every gc byte is still
+                # correct; only the recorded contig length is off by one, so
+                # this gate is the only thing that can catch it.
+                contig_lengths=dict(FIXTURE_CONTIG_LENGTHS, chr1=CHR1_LEN + 1),
+            )
+
+            with pytest.raises(RepairAbort, match="FASTA length 20000 != H5"):
+                repair_local_file(
+                    local_path=h5_path,
+                    fasta_path=tiny_fasta,
+                    cumsum_cache_dir=cache_dir,
+                    fasta_sha256=fasta_sha256,
+                    dry_run=True,
+                )
+
+    def test_fragment_past_contig_end_aborts(self, tiny_fasta, cumsum_cache):
+        """A fragment whose stop runs past the FASTA contig — abort, do not index.
+
+        Without this gate the overrunning stop is used as a cumsum index and the
+        failure mode is a raw IndexError from deep inside the recompute rather
+        than a RepairAbort the runner can classify.
+        """
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        contigs = _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45))
+        chr1 = contigs["chr1"]
+        # Appended last and started past every existing start, so `starts`
+        # stays non-decreasing and the padding-row detector still says 'clean'.
+        chr1["starts"] = np.append(chr1["starts"], np.int32(CHR1_LEN - 100))
+        chr1["lengths"] = np.append(chr1["lengths"], np.uint16(150))
+        chr1["gc"] = np.append(chr1["gc"], np.uint8(100))
+        assert np.all(np.diff(chr1["starts"]) >= 0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "overrun.h5")
+            _make_fragment_h5(
+                h5_path, contigs, contig_lengths=FIXTURE_CONTIG_LENGTHS,
+            )
+
+            with pytest.raises(RepairAbort, match="extends past FASTA contig"):
+                repair_local_file(
+                    local_path=h5_path,
+                    fasta_path=tiny_fasta,
+                    cumsum_cache_dir=cache_dir,
+                    fasta_sha256=fasta_sha256,
+                    dry_run=True,
+                )
+
+
+# ---------------------------------------------------------------------------
+# Mixed truncation verdicts across contigs
+# ---------------------------------------------------------------------------
+
+class TestMixedTruncationVerdicts:
+    """A file where some contigs need truncating and others do not is blocking.
+
+    The padding row was appended by a single builder pass, so it is present on
+    every contig or none. A file that disagrees with itself is outside the
+    understood failure mode and must go to human review.
+    """
+
+    def test_mixed_verdicts_abort(self, padded_h5, tiny_fasta, cumsum_cache):
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        # Drop the phantom row from chr2 only, leaving chr1 padded.
+        with h5py.File(padded_h5, "r+") as f:
+            truncate_contig_datasets(f, "chr2")
+            assert detect_padding_row(f, "chr1") == "truncate"
+            assert detect_padding_row(f, "chr2") == "clean"
+
+        sha_before = compute_file_sha256(padded_h5)
+        with pytest.raises(RepairAbort, match="Mixed truncation verdicts"):
+            repair_local_file(
+                local_path=padded_h5,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=False,
+            )
+        assert compute_file_sha256(padded_h5) == sha_before
+
+
+# ---------------------------------------------------------------------------
+# FASTA handle lifetime (implementation review r2)
+# ---------------------------------------------------------------------------
+
+class TestFastaHandleLifetime:
+    """The FASTA handle is released on every exit path, not just the happy one."""
+
+    @staticmethod
+    def _spy_on_fasta(monkeypatch):
+        """Record every pysam.FastaFile repair.py opens."""
+        import fragments_h5.repair as repair_mod
+
+        opened = []
+        real = repair_mod.pysam.FastaFile
+
+        def spy(*args, **kwargs):
+            handle = real(*args, **kwargs)
+            opened.append(handle)
+            return handle
+
+        monkeypatch.setattr(repair_mod.pysam, "FastaFile", spy)
+        return opened
+
+    def test_handle_closed_on_success(
+        self, clean_h5, tiny_fasta, cumsum_cache, monkeypatch,
+    ):
+        cache_dir, fasta_sha256 = cumsum_cache
+        opened = self._spy_on_fasta(monkeypatch)
+
+        repair_local_file(
+            local_path=clean_h5,
+            fasta_path=tiny_fasta,
+            cumsum_cache_dir=cache_dir,
+            fasta_sha256=fasta_sha256,
+            dry_run=True,
+        )
+
+        assert opened, "repair_local_file never opened the FASTA"
+        assert all(h.closed for h in opened)
+
+    def test_handle_closed_on_abort(
+        self, tiny_fasta, cumsum_cache, monkeypatch,
+    ):
+        """A RepairAbort raised between the open and the close must not leak it."""
+        cache_dir, fasta_sha256 = cumsum_cache
+        opened = self._spy_on_fasta(monkeypatch)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "wrong_length.h5")
+            _make_fragment_h5(
+                h5_path,
+                _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45)),
+                contig_lengths=dict(FIXTURE_CONTIG_LENGTHS, chr1=CHR1_LEN + 1),
+            )
+
+            with pytest.raises(RepairAbort):
+                repair_local_file(
+                    local_path=h5_path,
+                    fasta_path=tiny_fasta,
+                    cumsum_cache_dir=cache_dir,
+                    fasta_sha256=fasta_sha256,
+                    dry_run=True,
+                )
+
+        assert opened, "the abort happened before the FASTA was opened"
+        assert all(h.closed for h in opened), "FASTA handle leaked on abort"

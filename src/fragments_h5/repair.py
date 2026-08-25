@@ -8,6 +8,7 @@ See docs/pending/gc_repair_tool.md for the full design document.
 """
 
 import argparse
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -648,8 +649,10 @@ def repair_local_file(
     sha256_original = compute_file_sha256(local_path)
     report["sha256_original"] = sha256_original
 
-    # Read the file and run all analysis
-    with h5py.File(local_path, "r") as f:
+    # Read the file and run all analysis. Everything opened on the stack is
+    # closed on the way out, including on a RepairAbort raised mid-analysis.
+    with contextlib.ExitStack() as stack:
+        f = stack.enter_context(h5py.File(local_path, "r"))
         # Step 2: Preflight
         gc_presence = check_gc_presence(f["data"])
         report["gc_presence"] = gc_presence
@@ -678,7 +681,7 @@ def repair_local_file(
         # FASTA reference info (if gc is present)
         fasta_ref = None
         if has_gc:
-            fasta_ref = pysam.FastaFile(fasta_path)
+            fasta_ref = stack.enter_context(pysam.FastaFile(fasta_path))
 
         # ── Step 3: Detect padding per contig ──
         truncation_verdicts = {}
@@ -797,9 +800,6 @@ def repair_local_file(
             contig: {k: v for k, v in res.items() if k != "new_gc"}
             for contig, res in gc_results.items()
         }
-
-        if fasta_ref is not None:
-            fasta_ref.close()
 
     # ── Step 6: If dry-run, stop and report ──
     if dry_run:
