@@ -1,5 +1,5 @@
 """Tests for the SubBuildArgs dataclass and its derived accessor in
-build_fragments_h5 (see docs/pending/worker_args_refactor.md).
+build_fragments_h5 (see docs/architecture/worker_args_refactor.md).
 
 Both tests here target the code paths implicated in the released v2.10.1
 defect: a stale positional read of the worker-args tuple,
@@ -122,7 +122,7 @@ def test_total_bases_progress_total_matches_actual_chunk_sum(monkeypatch):
 
 def test_sub_build_args_not_subscriptable():
     """The whole point of replacing the 17-element positional tuple with a
-    dataclass (docs/pending/worker_args_refactor.md §3.1) is that `a[4] -
+    dataclass (docs/architecture/worker_args_refactor.md §3.1) is that `a[4] -
     a[3]`-style access must be impossible: a NamedTuple is a tuple subclass
     and would keep positional access working, silently preserving the exact
     accessor pattern that shipped the v2.10.1 TypeError. Pin that claim
