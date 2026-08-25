@@ -90,6 +90,19 @@ remaining git-side anchor for that artifact. The tag was deleted because a label
 that points at unbuildable source is worse than no label — but the information it
 implied is preserved here rather than destroyed.
 
+**`_build_version` no longer written (2026-08-25).** Decided by the user
+after an EM critical review of the 2.12.0/2.12.1 build-provenance work above.
+`_build_version` (from installed dist-info) and `_build_code_revision` (from
+`git describe`, primarily) could disagree — measured on this machine, a
+locally built h5 carried a stale `_build_version` next to a correct
+`_build_code_revision`. `_build_code_revision` is now the sole authoritative
+field for code identity; `_build_version` is retained read-only
+(`FragmentsH5.build_version`) for backward compatibility with files written
+by 2.12.0 and 2.12.1, but is no longer written to new files. No format
+version bump. See
+`docs/architecture/fragment_selection_and_build_provenance.md`'s 2026-08-25
+addendum for the full rationale.
+
 ### v2.7.0 (2026-02-11)
 
 **Fixed:**

@@ -1307,10 +1307,6 @@ def build_fragments_h5(
             f.attrs["_contig_lengths_str"] = contig_lengths_str
             if build_argv is not None:
                 f.attrs["_build_argv"] = json.dumps(build_argv)
-            try:
-                f.attrs["_build_version"] = importlib.metadata.version("fragments-h5")
-            except importlib.metadata.PackageNotFoundError:
-                pass
             _code_rev = _resolve_build_code_revision()
             if _code_rev is not None:
                 f.attrs["_build_code_revision"] = _code_rev

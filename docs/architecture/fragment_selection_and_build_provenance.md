@@ -522,7 +522,7 @@ the two missing pieces.
 | Attribute | Type | Written when | Content |
 |---|---|---|---|
 | `_build_argv` | `str` (JSON array of strings) | only when the caller supplies argv | `json.dumps(sys.argv)` as captured in `main.py` |
-| `_build_version` | `str` | always, when determinable | `importlib.metadata.version("fragments-h5")` |
+| `_build_version` | `str` | **no longer written** as of the Addendum below; only read, for files written by 2.12.0/2.12.1 | `importlib.metadata.version("fragments-h5")` |
 
 Written in the file-creation block alongside the existing five attributes
 (`fragments_h5.py:1147-1151`). Attributes, not datasets, matching the house rule
@@ -634,6 +634,45 @@ unknown; there is no second thing to disambiguate.
 
 **No new worker-tuple element** — provenance is written in the main process at
 file creation.
+
+*(2026-08-25: the paragraphs above describe 2.12.0/2.12.1 behavior. As of the
+Addendum immediately below, `_build_version` is no longer written at all, so
+the staleness problem they describe cannot recur for new files — there is
+nothing to go stale.)*
+
+### Addendum (2026-08-25): stop writing `_build_version`
+
+**Decided by the user, after an EM critical review.** `_build_version` and
+`_build_code_revision` can disagree, and did: a file built locally on this
+machine carried `_build_version='2.11.0'` (stale — `importlib.metadata`
+reads installed dist-info, which had not been reinstalled) right next to
+`_build_code_revision='git:v2.12.1-11-g0f787af'` (correct, since its primary
+resolution path is `git describe` against the working tree, not dist-info).
+Two provenance fields disagreeing, and the one named "version" — the more
+authoritative-sounding name — was the less trustworthy one.
+
+**Change: keep reading, stop writing.** The `try/except PackageNotFoundError`
+write block described above is removed from the file-creation block.
+`FragmentsH5.__init__`'s `.attrs.get("_build_version")` read and the
+`build_version` accessor are unchanged, so files written by 2.12.0 and 2.12.1
+(which did write the attribute) still expose it through `.build_version`.
+Newly built files simply return `None`.
+
+**`_build_code_revision` is now the sole authoritative field for code
+identity.** See "Code revision is library-side, unlike argv" below — it
+already existed alongside `_build_version` and does not share its
+staleness failure mode.
+
+**No format version bump**, consistent with the rest of this document:
+`.get()` already makes the attribute's absence unremarkable — true for
+pre-2.12.0 files before this change, and now also true for post-2.12.1 files
+built after it, for the same reason.
+
+**Supersedes part of "Known limitation: derived h5s drop provenance" below.**
+`_build_version` presence no longer discriminates "built by >= 2.12.0" from
+anything, because 2.12.2+ never writes it either — only 2.12.0 and 2.12.1
+did. `_build_code_revision` presence/format remains the discriminating
+signal going forward.
 
 ### Code revision is library-side, unlike argv
 
@@ -756,9 +795,12 @@ derived h5 may carry no provenance while looking like a normal file.
 **Is absence-of-provenance distinguishable from built-before-this-change?**
 Partially, and the design does not pretend otherwise:
 
-- `_build_version` present -> built by >= 2.12.0 from an installed distribution.
+- `_build_version` present -> built by 2.12.0 or 2.12.1 from an installed
+  distribution. (Per the 2026-08-25 Addendum above, this is now a closed,
+  two-version range, not "any version >= 2.12.0" — 2.12.2+ never writes it.)
 - `_build_version` absent -> pre-2.12.0, **or** built from an uninstalled tree,
-  **or** derived by one of the two allowlist scripts above.
+  **or** derived by one of the two allowlist scripts above, **or** built by
+  2.12.2+ (which never writes it regardless of install state).
 
 Those three are not distinguishable from the file alone. Adding a sentinel or a
 format version to disambiguate them was considered and rejected (below): it buys

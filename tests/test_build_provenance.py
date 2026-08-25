@@ -46,7 +46,15 @@ def _make_simple_bam(path):
 
 
 def test_provenance_absent_for_library_caller():
-    """Library caller (no build_argv) should have _build_version but not _build_argv."""
+    """Library caller (no build_argv) should have neither _build_argv nor
+    _build_version. _build_version is no longer written for newly built
+    files (2026-08-25 decision) -- _build_code_revision is the authoritative
+    code-identity field now; this asserts the new-file contract directly.
+
+    Mutation this detects: reinstating the removed
+    `f.attrs["_build_version"] = importlib.metadata.version(...)` write
+    makes the `"_build_version" not in f.attrs` assertion go red.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         bam = os.path.join(tmpdir, "test.bam")
         _make_simple_bam(bam)
@@ -58,7 +66,7 @@ def test_provenance_absent_for_library_caller():
         )
         with h5py.File(h5_path, "r") as f:
             assert "_build_argv" not in f.attrs
-            assert f.attrs["_build_version"] == importlib.metadata.version("fragments-h5")
+            assert "_build_version" not in f.attrs
 
 
 def test_provenance_recorded_when_argv_passed():
@@ -80,7 +88,12 @@ def test_provenance_recorded_when_argv_passed():
 
 
 def test_provenance_accessors():
-    """FragmentsH5.build_argv and .build_version return parsed values."""
+    """FragmentsH5.build_argv returns the parsed value. build_version is
+    None for a newly built file, since it is no longer written
+    (2026-08-25 decision) -- see test_old_file_build_version_still_exposed
+    for the backward-compatibility accessor contract on files that do have
+    the attribute.
+    """
     fake_argv = ["build-fragments-h5", "input.bam", "output.h5"]
     with tempfile.TemporaryDirectory() as tmpdir:
         bam = os.path.join(tmpdir, "test.bam")
@@ -94,7 +107,34 @@ def test_provenance_accessors():
         )
         with FragmentsH5(h5_path) as fh5:
             assert fh5.build_argv == fake_argv
-            assert fh5.build_version == importlib.metadata.version("fragments-h5")
+            assert fh5.build_version is None
+
+
+def test_old_file_build_version_still_exposed():
+    """A file carrying _build_version (as written by 2.12.0/2.12.1, before
+    the 2026-08-25 decision to stop writing it) must still expose that value
+    through the build_version accessor -- new files simply never have the
+    attribute to begin with, but old ones that do must keep working.
+
+    Mutation this detects: removing (or hardcoding to None) the
+    `.attrs.get("_build_version")` read in FragmentsH5.__init__ makes the
+    equality assertion below fail.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bam = os.path.join(tmpdir, "test.bam")
+        _make_simple_bam(bam)
+        h5_path = os.path.join(tmpdir, "out.h5")
+        build_fragments_h5(
+            bam, h5_path,
+            single_end=True, se_max_fragment_length=1000,
+            num_processes=1, store_fragment_end_clipped=False,
+        )
+        # Simulate a file written by 2.12.0/2.12.1, which wrote this
+        # attribute unconditionally (when determinable).
+        with h5py.File(h5_path, "r+") as f:
+            f.attrs["_build_version"] = "2.11.0"
+        with FragmentsH5(h5_path) as fh5:
+            assert fh5.build_version == "2.11.0"
 
 
 def test_file_without_provenance_opens():
@@ -111,11 +151,15 @@ def test_file_without_provenance_opens():
         # Delete provenance attrs to simulate a pre-2.12.0 file.
         # _build_argv is genuinely conditional here: this file was built without
         # build_argv (see call above), so it was never written. _build_version is
-        # always present for an installed build, so it is deleted unconditionally.
+        # also never written for a new file (2026-08-25 decision), so both
+        # deletions below are conditional/no-ops in practice; kept unconditional-
+        # style guards so this test still passes if that decision is ever
+        # reversed.
         with h5py.File(h5_path, "r+") as f:
             if "_build_argv" in f.attrs:
                 del f.attrs["_build_argv"]
-            del f.attrs["_build_version"]
+            if "_build_version" in f.attrs:
+                del f.attrs["_build_version"]
             if "_build_code_revision" in f.attrs:
                 del f.attrs["_build_code_revision"]
 
@@ -156,39 +200,19 @@ def test_cli_records_build_argv():
             assert json.loads(f.attrs["_build_argv"]) == argv
 
 
-def test_package_not_found_omits_build_version(monkeypatch):
-    """When importlib.metadata.version raises PackageNotFoundError (e.g. an
-    uninstalled tree), `_build_version` must be omitted from the output
-    rather than written as an error string or crashing the build.
-
-    Previously only the *result* of this branch was simulated -- by
-    deleting `_build_version` after a successful build in
-    test_file_without_provenance_opens -- but the `except
-    PackageNotFoundError: pass` branch (fragments_h5.py:1184-1185) itself
-    was never executed by any test.
-
-    Mutation this detects: removing the try/except around
-    `importlib.metadata.version(...)` at fragments_h5.py:1182-1185 makes
-    PackageNotFoundError propagate out of build_fragments_h5 instead of
-    being swallowed; this test's build_fragments_h5() call would raise
-    instead of completing.
-    """
-    def _raise(*args, **kwargs):
-        raise importlib.metadata.PackageNotFoundError("fragments-h5")
-
-    monkeypatch.setattr(importlib.metadata, "version", _raise)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        bam = os.path.join(tmpdir, "test.bam")
-        _make_simple_bam(bam)
-        h5_path = os.path.join(tmpdir, "out.h5")
-        build_fragments_h5(
-            bam, h5_path,
-            single_end=True, se_max_fragment_length=1000,
-            num_processes=1, store_fragment_end_clipped=False,
-        )
-        with h5py.File(h5_path, "r") as f:
-            assert "_build_version" not in f.attrs
+# NOTE (2026-08-25): test_package_not_found_omits_build_version previously
+# lived here. It existed solely to cover the `except PackageNotFoundError:
+# pass` branch around the `_build_version` write, which has been deleted
+# entirely (not written at all, unconditionally) -- there is no longer a
+# try/except at that site for PackageNotFoundError to exercise. It was not
+# replaced 1:1: the broader property it also touched on -- that
+# PackageNotFoundError anywhere in build_fragments_h5 must not crash the
+# build -- is already independently covered by
+# test_revision_total_failure_omits_attribute below, which monkeypatches the
+# same importlib.metadata.version and drives a full build_fragments_h5()
+# call to completion. test_provenance_absent_for_library_caller above covers
+# the new contract (newly built files never have _build_version, regardless
+# of import state).
 
 
 # --- _build_code_revision tests ---
