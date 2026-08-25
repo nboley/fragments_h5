@@ -63,7 +63,8 @@ repair *loud* are the load-bearing part of this design and are now the *only* lo
 **Where the document got heavier, deliberately.** The scope grew (§2.2, §3.2): the tool now also
 truncates a phantom padding row from **every dataset of every contig** and rebuilds the index and
 `fragment_length_counts`. That is a larger blast radius than the original one-dataset repair, and it
-brought its own Critical (§2.2.3).
+brought its own Criticals — the ~41,000 NaN divisions and the reverse `x → 255` abort of §3.3, both
+of which are unaffected by round 4's correction to §2.2.3.
 
 **Net effect on length: roughly flat, and slightly longer.** ~250 lines of safety scaffolding were
 deleted; ~370 lines of truncation design, its hazards and its validation gap were added. This
@@ -183,24 +184,48 @@ every one of those is length **287,534** with a zero/empty final element — `st
 
 Note `mapq` is **2-D** (per-mate). Truncation is along **axis 0 only**; nothing may assume 1-D.
 
-#### 2.2.3 Three live consequences, one of which is a query-correctness bug today
+#### 2.2.3 Three consequences: one live bug, and one latent hazard with two faces
 
-1. **`starts` is not sorted.** chrM's tail reads `[..., 16535, 0]`. `read_fragments`
-   (`fragments_h5.py:509-510`) runs `numpy.searchsorted` over a sub-array selected by the index; a
-   query landing in the final index block scans a range that includes the phantom, and binary search
-   over an unsorted array has no defined answer. **This is a live bug in these files right now,
-   independent of GC.**
+This section was rewritten after the external review (finding 2). An earlier revision claimed **two**
+live bugs. That was wrong: the `searchsorted`-on-unsorted-`starts` consequence was traced to
+completion and is **not** a live incorrect result. The claim now made is exactly:
+**no real fragment is missed and the phantom is never returned; only `n_fragments` is wrong today.**
+
+1. **`starts` is not sorted — a latent hazard, not a live incorrect result.** chrM's tail reads
+   `[..., 16535, 0]`. There are two `numpy.searchsorted` sites over that array, and **both are
+   benign as the code stands**:
+
+   - *Query time* (`fragments_h5.py:509-510`). The phantom is `start = 0, length = 0`, so its
+     `stop` is `0`. The overlap mask (`fragments_h5.py:538-540`) requires `stops > region_start`,
+     which is false for every `region_start >= 0`. The phantom is therefore **unconditionally
+     filtered and can never be returned**, whatever the binary search does with it.
+   - *Index build* (`fragments_h5.py:1235-1237`). The index was built by
+     `searchsorted(starts[:], block_indices, side="left")` with the phantom present, so the stored
+     index could in principle be wrong. Tracing the binary search: position `n-1` is only ever
+     examined once `lo` has advanced past every real start — i.e. only for genomic blocks beyond
+     the last fragment's start. For those blocks the entry comes out as `n` rather than `n-1`. But
+     the appended sentinel (`fragments_h5.py:1240`) is *also* `len(starts) == n`, so such a query
+     gets `fragment_lower_bound_index == fragment_upper_bound_index` and returns empty at
+     `fragments_h5.py:489-490` — **which is the correct answer for a block containing no
+     fragments.**
+
+   So the defect is real but latent: `searchsorted` on formally-unsorted input is undefined
+   behaviour, and a future refactor (a different `side=`, a mask reordering, a vectorized query
+   path) could expose it. It is a reason to fix the data, not evidence of wrong answers today.
 2. **The index counts the phantom.** chrM's index is `[0, 78285, 146135, 248324, 287534]` with
    `index_block_size = 5000` (`fragments_h5.py:172`), and the appended end sentinel
    (`fragments_h5.py:1240`, `numpy.append(index_poss, len(starts))`) equals `n_frags` *including*
-   the phantom. Worse, the interior entries were themselves produced by `numpy.searchsorted` over
-   the unsorted `starts` (`fragments_h5.py:1235-1237`), so **the trailing entries may be wrong too**
-   — the index cannot be repaired by decrementing the sentinel and must be rebuilt from scratch.
-3. **`fragment_length_counts` is inflated.** `_add_fragment_length_counts`
+   the phantom. The interior entries were themselves produced by `numpy.searchsorted` over the
+   unsorted `starts` (`fragments_h5.py:1235-1237`) — benign today per point 1, but **not something
+   to preserve**: the index must be rebuilt from scratch rather than repaired by decrementing the
+   sentinel, because we do not want to carry a formally-undefined derivation forward into the
+   repaired file.
+3. **`fragment_length_counts` is inflated — this one is live.** `_add_fragment_length_counts`
    (`fragments_h5.py:723-735`) histograms `lengths` over every contig, so each phantom adds one
    count at bin 0. `FragmentsH5.n_fragments` is `fragment_length_counts.sum()`
    (`fragments_h5.py:321-323`), so **`n_frags` is over-reported by one per contig group** —
-   ~189 per file across the 218. This is a second live bug, also independent of GC.
+   ~189 per file across the 218. This is a **live** wrong value returned to any caller today,
+   independent of GC, and it is the only one.
 
 #### 2.2.4 Disposition (user decision, binding)
 
@@ -287,7 +312,8 @@ Per target file, strictly in this order. **No step before 7 writes anything to S
    written.
 4. **Recompute** all `gc` values, on the **truncated** arrays, for every contig present in both the
    H5 and the FASTA, into in-memory `uint8` arrays (§3.4). The ordering relative to step 3 is
-   load-bearing — see §3.3.
+   load-bearing — see §3.3. If the file has **no `gc` dataset**, this step and step 5 are skipped
+   and steps 2, 3 and 7–10 run unchanged — see §3.2.5.
 5. **Pre-saturation oracle gate** (§7.2) and **diff and gate**: compare recomputed vs stored, per
    contig, per region (§2.1). Report counts. The `< T23` byte-identity requirement of §5b **is** the
    §7.2 oracle — one check, stated once in §5b's region table, not two.
@@ -415,18 +441,44 @@ unlinks. **The size question is genuinely open** and is §12.4. The gate: on the
 repaired, compare against a from-scratch rebuild expectation; if in-place growth exceeds **5%** of
 that, run `h5repack` on the local file before upload. `h5repack` preserves attributes and re-applies
 the existing layout by default, so it is the fallback that does *not* resurrect the attr-fidelity
-problem a hand-written rewrite would. Its availability on this machine is unverified (§12.4).
+problem a hand-written rewrite would.
 
-Precedent for in-place mutation exists (`build_fragments_h5` reopens its own output `"r+"` at
-`fragments_h5.py:1248` to add `fragment_length_counts`; `tests/test_build_provenance.py:109` opens
-`h5py.File(..., "r+")`), but **deleting and recreating an existing dataset is a new pattern in this
-repo**. Treat it as such: it gets its own test (§7.4 stage 0).
+**`h5repack` availability is a gate on stage 2, not an open question** (review condition 2). It is
+currently unverified on this machine (§12.4), and a fallback whose existence is unknown is not a
+fallback. Before §7.4 stage 2 — the first `--apply` of any kind — run `h5repack --version` and record
+the result in the ledger's run header. Then:
+
+- **Available:** proceed. The 5% bloat threshold triggers it as specified above.
+- **Not available:** proceed **only** after one of (a) installing it (`hdf5-tools`), or (b) a human
+  explicitly accepting the worst case of §3.2.2 — up to ~2× file size, ~180 GB of S3 growth across
+  the 218 — and recording that acceptance. Do **not** silently proceed on the assumption that the
+  best case will hold; the size experiment behind that assumption is explicitly weak evidence.
+
+There is no third fallback, and building a from-scratch rewrite path would resurrect exactly the
+attr-fidelity problem that in-place mutation was chosen to avoid. That is the reason this is a gate
+rather than a runtime branch: it must be resolved by a person, before any production write.
+
+Precedent for in-place mutation exists, but it is weaker than an earlier revision of this document
+implied, and the citation was imprecise (review finding 5). Precisely:
+
+- `build_fragments_h5` reopens its own output `"r+"` at `fragments_h5.py:1248` to add
+  `fragment_length_counts` — precedent for in-place *creation of a new dataset*.
+- `tests/test_build_provenance.py:109-112` opens `h5py.File(..., "r+")` and `del`s
+  `_build_argv` / `_build_version` — precedent for in-place *deletion of attrs*. The single-line
+  citation `:109` previously used points only at the `with` statement; the deletions are at
+  `:110-112`.
+
+Neither is precedent for deleting and recreating an existing **dataset**, which is **a new pattern
+in this repo**. Treat it as such: it gets its own test (§7.4 stage 0).
 
 #### 3.2.3 Index rebuild
 
 The index **must be rebuilt from scratch**, not adjusted. §2.2.3 point 2: its interior entries were
 produced by `numpy.searchsorted` over an unsorted `starts`, so decrementing the sentinel would
-preserve whatever the binary search happened to return near the tail.
+preserve whatever the binary search happened to return near the tail. Note this is a
+*hygiene* argument, not a bug-fix argument — §2.2.3 point 1 shows the existing entries yield correct
+(empty) results today. Rebuilding is cheap and removes a formally-undefined derivation from the
+repaired file; adjusting the sentinel would carry it forward. Rebuild.
 
 Rebuild by **calling the same code path the builder uses**, not by reimplementing it —
 `fragments_h5.py:1225-1241`, including both guards:
@@ -437,9 +489,19 @@ Rebuild by **calling the same code path the builder uses**, not by reimplementin
   then `numpy.append(index_poss, len(starts))`.
 
 `INDEX_BLOCK_SIZE` must be read from the file's own `index_block_size` attr (`fragments_h5.py:306`),
-**not** from the module constant, which is `5000` at `fragments_h5.py:172` but appears as `10000` at
-four other definition sites in the same file (`:31`, `:50`, `:72`, `:95`). A file built with a
-different block size must be re-indexed with *its* block size or the index is silently wrong.
+**not** from the module constant. There is exactly **one** definition of the constant —
+`INDEX_BLOCK_SIZE = 5000` at `fragments_h5.py:172`. (An earlier revision of this document claimed
+"four other definition sites" at `:31`, `:50`, `:72`, `:95`. Those four lines do carry the text
+`INDEX_BLOCK_SIZE = 10000`, but they are inside the **module docstring**, which runs from line 1 to
+line 139 — they are historical benchmarking notes, not code. Corrected per review finding 1.)
+
+The recommendation stands on its own merits, and the docstring is in fact evidence *for* it: the
+value has changed over the life of this format, so a file on disk may have been indexed with a block
+size that is not today's constant. `build_fragments_h5` writes whatever constant was live at build
+time into the attr (`fragments_h5.py:1175`), and `FragmentsH5` reads that attr — not the constant —
+when servicing queries (`:306`, `:485`). A rebuild that used the module constant instead of the attr
+would produce an index the query path indexes into with the wrong stride, silently and without
+error. Read the attr.
 
 **Blocking invariant:** the rebuilt index's *key set* must equal the existing one. A contig that
 gains or loses an index entirely means either the guards were evaluated differently at build time or
@@ -453,10 +515,29 @@ directly — it is one `numpy.diff(...).min() >= 0` per contig and it is the pro
 #### 3.2.4 `fragment_length_counts` rebuild
 
 Delete and recreate the root `fragment_length_counts` dataset from the truncated `lengths` arrays.
-`_add_fragment_length_counts` (`fragments_h5.py:723-735`) assigns with `self._f[...] = ...`, which
-raises if the key exists, so the tool must `del` first — or, preferably, call
-`_add_fragment_length_counts` after deleting the key, so there is one implementation of the
-histogram and not two.
+Reuse `_add_fragment_length_counts` (`fragments_h5.py:723-735`) rather than reimplementing the
+histogram, so there is one implementation and not two. Its final statement is
+`self._f["fragment_length_counts"] = fragment_lengths` (`fragments_h5.py:735`) — that is
+`Group.__setitem__`, which **raises if the key already exists**. So the key must be deleted first,
+and the method is on `FragmentsH5`, not on a raw `h5py.File`. That forces a close-and-reopen. The
+required sequencing, stated explicitly (review finding 3):
+
+1. Do **all** dataset truncation, GC rewrites, and the index rebuild under the raw
+   `h5py.File(path, "r+")` handle.
+2. **Close** that handle. Two handles must never be open on the same file at once.
+3. Reopen as `fm_h5 = FragmentsH5(path, "r+")` — the same thing the builder does at
+   `fragments_h5.py:1248`.
+4. `del fm_h5._f["fragment_length_counts"]`.
+5. `fm_h5._add_fragment_length_counts()`.
+6. `fm_h5.close()`.
+
+Two notes for the implementer. First, `FragmentsH5.__init__` caches the **stale**
+`fragment_length_counts` into `self.fragment_length_counts` at `fragments_h5.py:312-313` during step
+3. This is harmless — `_add_fragment_length_counts` recomputes from `self._f["data"][contig]`
+["lengths"] from scratch and never reads the cached attribute — but it does mean the *in-memory*
+`fm_h5.n_fragments` stays stale until the object is reopened. The blocking invariant below must
+therefore be checked against the **dataset re-read from the file**, not against `fm_h5.n_fragments`
+on the same handle. Second, capture `old_counts` **before** step 4 deletes it.
 
 **Blocking invariant:** `new_counts[0] == old_counts[0] - (number of contigs truncated)` and
 `new_counts[k] == old_counts[k]` for every `k >= 1`. This is an exact arithmetic identity — the
@@ -467,6 +548,34 @@ check that the truncation did exactly what it claimed, and it costs one array co
 Consequence, stated because it is user-visible: **`FragmentsH5.n_fragments` will decrease by the
 number of contig groups** (~189) in each repaired file. That is the intended correction of §2.2.3
 point 3, and it is the change the user has explicitly accepted.
+
+#### 3.2.5 Files with no `gc` dataset
+
+The 218 all have `gc`, so this subsection does not affect the production run. It exists because the
+user's binding instruction is that this be *"used as a general repair/update script going forward"*,
+and a general tool will meet these files. `gc` is written only `if read_gc:`
+(`fragments_h5.py:893-894`), so every H5 built before the GC feature landed (2025-11-20) has
+`starts`, `lengths`, `mapq` and possibly `strand`/methyl/`fragment_end_clipped`, but **no `gc`
+dataset at all**. §2.4 records that the alternate copy of every one of the 218 is exactly such a
+file, so these are not hypothetical.
+
+`FragmentsH5.has_gc` (`fragments_h5.py:360-364`) is `any("gc" in self.data[contig] ...)`. Note
+"any", not "all": a partially-`gc` file is representable. Specified behaviour:
+
+| condition | behaviour |
+|---|---|
+| `gc` present on **every** contig group | the full pipeline of §3.1, unchanged. |
+| `gc` present on **no** contig group | steps 3 (truncate + index rebuild + `fragment_length_counts` rebuild) and 7–10 run normally. Step 4 (recompute), step 5 (diff and the §7.2 pre-saturation gate), the §5b no-op guard and its `255 → x` / `x → 255` transition checks, and the §5 layer-3 all-255 assertion are **skipped entirely** — there is no array to compare against. Report `gc: absent, skipped`. |
+| `gc` present on **some** contig groups | **abort the file, blocking.** No build path produces this; it means either a partial write or an out-of-band edit, and neither is something to repair silently. |
+
+Two consequences worth stating. First, in the no-`gc` case the **reference-safety preflight of §5 is
+not needed and must not be run** — the tool never reads the FASTA, so `--fasta` becomes optional
+rather than required, and its absence is not an error. This removes the tool's single largest
+input-correctness risk for those files. Second, the no-`gc` case is exactly the case where the
+repair has *no* undetectable failure mode: everything it writes is either checked by an exact
+arithmetic identity (§3.2.4's `fragment_length_counts` invariant) or by a structural invariant
+(§3.2.3's key-set and sortedness assertions). The §0 weighting — that machinery earns its place by
+making a bad repair *detectable* — comes out differently here, and favourably.
 
 ### 3.3 Ordering: truncate first, then recompute — and why it matters
 
@@ -571,6 +680,23 @@ once and writes it to `--cumsum-cache DIR/<sha256-of-fasta>/<contig>.npy`. Worke
 `/tmp` overlay, 414 GB free), shared across all workers through the page cache, per-worker resident
 memory ≈ 0. Access is near-sequential because fragments are stored sorted by start within a contig.
 The cache directory is keyed by the FASTA's sha256, so a different FASTA can never hit a stale cache.
+
+**Cache lifetime, specified (review finding 8).** ~26 GB is large enough that "it just sits there"
+is not an acceptable non-answer:
+
+- **Location:** `--cumsum-cache DIR` defaults to a subdirectory of the system temp dir, so on a
+  machine that clears `/tmp` on boot the cache is self-limiting by default. Pointing it at NFS home
+  makes it persistent; that is a deliberate choice by the caller, not the default.
+- **Validity:** entries are immutable and content-addressed by the FASTA's sha256. An entry is never
+  stale — a changed FASTA gets a different directory. There is therefore no invalidation logic and
+  no TTL, only reclamation.
+- **Reclamation:** the tool never deletes cache entries during a run (a concurrent worker may be
+  mmap'ing them). It offers `--rebuild-cache`, which deletes and regenerates the entries for the
+  *current* FASTA's sha256 only, as an escape hatch for a cache corrupted by a partial write. Bulk
+  cleanup is `rm -rf` on the cache dir, and the tool prints its absolute path and total size at the
+  end of every run so the operator is never unaware of it.
+- **Partial writes:** each `<contig>.npy` is written to a temp name in the same directory and
+  `os.replace`d into place, so a crash mid-write leaves no half-file for the next run to mmap.
 
 This is ~30 lines and it deletes the entire memory-pressure question, so it clears the "not
 over-engineered" bar. If it is rejected, the fallback is: no cache, `--num-processes 4`
@@ -765,7 +891,11 @@ about the H5 header or contig table catches this. `_contig_lengths_str` is usele
 rather than the FASTA. (The scoping matters — for TSV/BED input the contig lengths *are* taken from
 the FASTA, at `fragments_h5.py:1024-1037`. That path just is not the one that produced the 218.)
 
-Five layers, all mandatory, all failing **closed**:
+Five layers, all mandatory, all failing **closed**. **The whole of §5 applies only to files that
+have a `gc` dataset.** A file without one (§3.2.5) is never read against a reference, so there is no
+reference to be unsafe about: all five layers are skipped and `--fasta` is not required. This is the
+one place the no-`gc` path relaxes a safety property, and it relaxes it because the hazard is absent,
+not because the check is inconvenient.
 
 1. **`--fasta` is required and has no default.** No environment fallback, no "guess from the
    manifest", no hardcoded S3 URI anywhere in the package.
@@ -1149,8 +1279,11 @@ histogram looks unimodal" and "zero `255 → x` transitions" are not both ground
   255→NaN remap at `:570-574`);
 - **a read-back query test**: for a sample of contigs, `read_fragments` over the **final index
   block** returns results consistent with a brute-force scan of the truncated arrays. This is the
-  check that the §2.2.3 query-correctness bug is actually fixed, and it is the only one that
-  exercises the index end-to-end rather than by invariant.
+  check that §2.2.3 point 1's latent `searchsorted` hazard is actually retired, and it is the only
+  one that exercises the index end-to-end rather than by invariant. Note it is not expected to
+  *change* any answer relative to the pre-repair file — §2.2.3 shows the pre-repair answers were
+  already correct — so this check confirms the repair did no harm rather than confirming it did
+  good. That is the right thing for it to confirm.
 
 *Provenance:*
 - every attr **except `_repair_history`** hashes to the value recorded at §3.1 step 2;
@@ -1170,13 +1303,40 @@ histogram looks unimodal" and "zero `255 → x` transitions" are not both ground
 
 | Stage | Target | Gate to proceed |
 |---|---|---|
-| 0 | Unit + regression tests: a delete-and-recreate-dataset test, the **synthetic padding-row fixture** of §7.1.1 with its full check list, the §3.4 rounding-agreement test over >=10^7 fragments, and a §5b float32-accumulator-simulation test asserting the simulated band boundary lands where the pre-fix code saturates. Plus: **regenerate the lost REF-P12 sequence histogram** (§4.2) and commit it. The existing overflow regression test at `8820299` (`tests/test_gc_cumsum_overflow.py`, ~676 MB RSS) must still pass | green CI |
+| 0 | Unit + regression tests — **the explicit checklist below (0.a–0.g)**, every item ticked | green CI, all seven items ticked |
 | 1 | `--dry-run` clean replay on the 5 §7.1 targets | §7.1 criteria 1–4, all zeros including **zero contigs truncated** |
-| 2 | Full `--apply` rehearsal on **a scratch-prefix copy of one of the 218** (restored from the verified backup), written to the scratch key, not over the original | §7.3 blocking checks all pass, including the read-back query test; file-size advisory reviewed; first real runtime datum recorded (§3.6). **This is the only stage that exercises truncation on real data before production** (§7.1.1) |
+| 2 | Full `--apply` rehearsal on **a scratch-prefix copy of one of the 218** (restored from the verified backup), written to the scratch key, not over the original | **Entry gate: `h5repack --version` run and its result recorded** — if absent, install it or record explicit human acceptance of the ~2× worst case (§3.2.2). Then: §7.3 blocking checks all pass, including the read-back query test; file-size advisory reviewed; first real runtime datum recorded (§3.6). **This is the only stage that exercises truncation on real data before production** (§7.1.1) |
 | 3 | `--dry-run` across **all 218**: §7.2 pre-saturation gate, §7.2.1 two-reference byte-diff, and the per-contig truncation verdict | 218/218 pass the prefix oracle; **every contig of every file reports "truncate"** (R8) — any mixed verdict is blocking; every file with a nonzero REF-P12/REF-ASSETS byte-diff named, quantified, and accepted by a human |
 | 4 | `--apply` on **1** of the 218 | §7.3 all pass; manual review of the diff report |
 | 5 | `--apply` on the remaining 217 | — |
 | 6 | Post-run: re-probe a sample for `gc == 0`; confirm `n_fragments` dropped by the expected per-file contig count; spot-restore 3 files from backup and confirm they match the backup ledger's recorded checksums | before backups are deleted |
+
+**Stage 0 checklist.** Round 3 stated these as one prose sentence, which is how an item gets
+overlooked (review finding 7). They are seven independent items; tick each:
+
+- [ ] **0.a — delete-and-recreate-dataset test.** The new pattern of §3.2.2. Assert the recreated
+      dataset matches `mk_dataset`'s parameters (dtype, `compression="gzip"`, `compression_opts=4`,
+      chunked) and that group/file attrs are byte-identical across the operation.
+- [ ] **0.b — synthetic padding-row fixture** (§7.1.1) with its full check list: build a fixture
+      carrying one phantom row per contig, run the repair, assert truncation fired on every contig,
+      the index key set is unchanged, `starts` is non-decreasing, and §3.2.4's exact
+      `fragment_length_counts` identity holds.
+- [ ] **0.c — 2-D `mapq` truncation.** Assert truncation is along axis 0 only and the shape becomes
+      `(n-1, 2)`, not `(n-1,)` (§2.2.2). Cheap, and the one shape mistake that would corrupt real
+      data silently.
+- [ ] **0.d — rounding-agreement test** (§3.4) over **>= 10^7** real fragments plus the engineered
+      half-ulp set. Blocking; this is the last bit of every stored byte.
+- [ ] **0.e — float32-accumulator-simulation test** (§5b) asserting the simulated band boundary
+      lands exactly where the pre-fix code saturates.
+- [ ] **0.f — regenerate the lost REF-P12 sequence histogram** (§4.2) and **commit it**, so §4.2's
+      measured alphabet stops being a number this document asserts without a reproducible artifact.
+- [ ] **0.g — the existing overflow regression test still passes**: `tests/test_gc_cumsum_overflow.py`
+      (added at `8820299`, ~676 MB RSS), unchanged except for the docstring note described just
+      below this table (`OVERFLOW_THRESHOLD = 2**24` at `tests/test_gc_cumsum_overflow.py:37` is
+      correct *for that test* and must not be "fixed" to `2**23`).
+
+Item 0.f is the only one that is not a test; it is on this list because it is the artifact the rest
+of §4 depends on and it has been "will regenerate" for two rounds.
 
 Round 2 had eight stages with a 1 → 10 → 207 ramp. **The 10-file stage is deleted.** Each `--apply`
 stage runs the identical gate, so the tenth file tests nothing the first did not, and the failure is
@@ -1234,12 +1394,23 @@ file**, appended after upload verification (§6.2 step 3):
  "sha256_original": "...", "sha256_repaired": "...",
  "crc64nvme_repaired": "...",
  "fasta_sha256": "...", "tool_version": "2.13.0",
- "contigs_repaired": 25, "contigs_skipped_absent_from_fasta": 170,
- "contigs_truncated": 195, "rows_removed": 195,
- "n_fragments_before": 0, "n_fragments_after": 0,
- "gc_bytes_changed": 12345678, "repair_history_len": 1,
- "started_utc": "...", "finished_utc": "..."}
+ "contigs_repaired": "<int>", "contigs_skipped_absent_from_fasta": "<int>",
+ "contigs_truncated": "<int>", "rows_removed": "<int>",
+ "n_fragments_before": "<int>", "n_fragments_after": "<int>",
+ "gc_bytes_changed": "<int>", "repair_history_len": "<int>",
+ "started_utc": "<iso8601>", "finished_utc": "<iso8601>"}
 ```
+
+**This is a schema, not a sample.** Every value above is a placeholder: `"..."` for strings,
+`"<int>"` for integers, `"<iso8601>"` for timestamps. The emitted records carry real JSON numbers,
+not strings. An earlier revision wrote `"n_fragments_before": 0, "n_fragments_after": 0`, which reads
+as a real (and impossible) measurement rather than a placeholder — corrected per review finding 6.
+For orientation on magnitudes rather than schema: on a typical one of the 218 expect
+`contigs_truncated ≈ 189`, `rows_removed == contigs_truncated`, and
+`n_fragments_before - n_fragments_after == rows_removed` exactly (§3.2.4).
+
+On a file with no `gc` dataset (§3.2.5), `contigs_repaired`, `contigs_skipped_absent_from_fasta`,
+`gc_bytes_changed` and `fasta_sha256` are emitted as `null`, and `status` is `"ok_no_gc"`.
 
 `tool_version` is read from `importlib.metadata.version("fragments-h5")` at runtime, never hardcoded
 — a hardcoded string is provenance that can silently disagree with the code that wrote it.
@@ -1326,7 +1497,9 @@ is the single most useful thing this attr can carry.
 
 `datasets` now records the truncation as well as the `gc` rewrite, because a reader who sees only
 `data/*/gc` would reasonably assume the fragment counts were preserved. They were not (§3.2.4), and
-that is exactly the kind of change provenance exists to announce.
+that is exactly the kind of change provenance exists to announce. On a file with no `gc` dataset
+(§3.2.5), `data/*/gc` is omitted from `datasets` and `fasta_uri` / `fasta_sha256` are `null` — the
+attr must not imply a GC repair that did not happen.
 
 A *list* rather than scalar attrs, because "this file has been repaired more than once" is a real
 future state and rewriting scalars would erase history. This is the main piece of forward-looking
@@ -1402,7 +1575,9 @@ Policy is not a mechanism. The mechanism:
      are rejected at load time**, in both modes — two workers on one key produce two
      `_repair_history` timestamps and a racing upload, which is pointless even though it is no longer
      dangerous. The list is a set; enforce it where it is read.
-   - `--expect-fasta-sha256 <hex>` — pins the reference bytes (§5 layer 2).
+   - `--expect-fasta-sha256 <hex>` — pins the reference bytes (§5 layer 2). Required whenever any
+     target file has a `gc` dataset; **optional, and ignored, only if every target lacks one**
+     (§3.2.5). A file with `gc` and no pin is a hard error, never a silent skip.
    - `--ledger PATH` — where the per-file records go (§8.2).
    - `--max-files N` — hard cap, **default 1**. Scaling from 1 → 218 requires deliberately raising it
      on the command line, which makes §7.4's stages mechanical rather than aspirational.
@@ -1448,6 +1623,12 @@ records how the balance moved once the backup existed: the *reusable skeleton* g
   in-place S3 mutation will want it for the same reason.
 - The §5b no-op invariant expressed as `--dry-run`-by-default, which is a property of the skeleton,
   not of GC.
+- **Clean degradation on files with no `gc` dataset** (§3.2.5): truncation, index rebuild and
+  `fragment_length_counts` rebuild still run; the GC recompute, the §5 reference preflight and the
+  §5b/§7.2 GC checks are skipped, and `--fasta` becomes optional. This costs one branch and one
+  `has_gc` check, and without it the generality claim above is false the first time the tool meets a
+  pre-2025-11-20 file — which §2.4 confirms exist in quantity, since the alternate copy of every one
+  of the 218 is exactly such a file. Added in round 4 after external review finding 4.
 
 **Refused, explicitly:**
 - **In-tool backup orchestration** — backup verification, per-file barriers, write-once backup keys,
@@ -1528,9 +1709,11 @@ truncation rewrites every dataset, so there is no byte-identity claim left to ha
 4. **HDF5 space behaviour under ~1,200–1,900 delete-and-recreates is unmeasured** (§3.2.2). The one
    synthetic experiment rewrote a *single* dataset *in place at the same shape* and says nothing
    about free-space reuse across many small unlinks or about metadata leak. Worst case is ~2× a
-   from-scratch build. Gated at §7.4 stage 2 with a 5% threshold and an `h5repack` fallback whose
-   availability on this machine is **itself unverified**. The rewrite is also the largest unmodelled
-   term in §3.6's runtime estimate.
+   from-scratch build. Gated at §7.4 stage 2 with a 5% threshold and an `h5repack` fallback. That
+   fallback's availability on this machine is **still unverified as of this writing**, but it is no
+   longer merely an open question: §3.2.2 makes `h5repack --version` an explicit **entry gate on
+   stage 2**, with the only alternatives being install it or record human acceptance of the ~2×
+   worst case. The rewrite is also the largest unmodelled term in §3.6's runtime estimate.
 5. **The `round(x, 5)` vectorization is unimplemented and unbenchmarked** (§3.4). We know NumPy's and
    CPython's five-place rounding can disagree and that the disagreement is observable in the stored
    byte; we do not yet know whether the exactly-correct elementwise path is fast enough, and the
@@ -1578,9 +1761,18 @@ mechanism is misconfigured.
 from source and produced a document that was wrong about the shape of the data. The first time
 someone opened a real file, a defect appeared that (a) affects every dataset rather than one,
 (b) would have caused ~41,000 NaN divisions had the GC repair run as specified (§3.3), (c) would have
-aborted all 218 files on a spurious `x → 255` hard error, and (d) is a **live query-correctness bug
-and a live `n_fragments` bug in production today**, independent of GC. None of the three prior
-Criticals found it, because none of them looked.
+aborted all 218 files on a spurious `x → 255` hard error, and (d) is a **live `n_fragments` bug in
+production today** plus a latent `searchsorted`-on-unsorted hazard, independent of GC. None of the
+three prior Criticals found it, because none of them looked.
+
+(Round 3 claimed **two** live bugs here. The external review challenged the query-correctness half,
+and tracing it to completion showed the reviewer was right to challenge it and that the resolution
+is cleaner than "narrower": the phantom is unconditionally filtered by the overlap mask, and the
+index entries that the unsorted `searchsorted` could corrupt collide with the appended sentinel and
+yield the correct empty result. One live bug, one latent hazard — §2.2.3. This does not change any
+design decision in this document; it changes what the document is entitled to claim. Which is the
+point: three of the four consequences above are still exactly as stated, and (a)–(c) are what
+actually justify the truncation work.)
 
 **The weakest point.** The truncation path is the largest thing in this document and it has the least
 evidence behind it. Its primary oracle is structurally unavailable — a file that is clean for GC is
@@ -1596,12 +1788,33 @@ from sequence past ~40.45 Mb, which the oracle never touches. §7.2.1's two-refe
 the answerable half (REF-P12 vs REF-ASSETS); arbitrary drift of REF-P12 itself has no candidate to
 diff against and therefore no possible check.
 
-**Grade: B+, unchanged from round 2, and the stability is the honest signal.**
+**Grade: B+, unchanged through rounds 2, 3, and the external review, and the stability is the honest
+signal.**
 
-Three things improved: one real file was finally opened, so the foundation is no longer entirely
-inferred; the backup landed and was verified, so the operation is reversible; and ~250 lines of
-now-dead mechanism were deleted rather than caveated, which makes the remaining mechanism easier to
-review.
+Round 4 (this one) addressed all eight actionable findings from the external review. **It does not
+move the grade, and it should not.** What round 4 changed was: two accuracy defects corrected (one
+of which — M2 — meant the document had been *overstating the severity of the problem it exists to
+solve* for two rounds), one implementation sequence spelled out, one edge case specified, and four
+low-severity items closed. Every one of those is a documentation defect, not a design improvement.
+The design is what it was; the document now describes it accurately. Correcting an overstatement is
+not an achievement that earns a higher grade — it is the removal of an error that should not have
+been there. The B+ was never being held down by these eight items.
+
+The specific reason the grade cannot move up: **the truncation path is still specified, unwritten
+and unrun**, and its evidence base is unchanged by anything in round 4. That is the load-bearing
+weakness (below), and no amount of documentation accuracy substitutes for the missing evidence.
+
+The specific reason it should not move down: nothing found in the external review was Critical or
+High, the correctness argument (§4), the reference-safety analysis (§5), the measured REF-P12 facts,
+and ~20 citations were independently verified and confirmed. M2 in particular made the *stated*
+problem smaller without making the *actual* work smaller — every one of §3.3's three ordering
+hazards, and the entire truncation mechanism, is justified by consequences (a)–(c), which the review
+did not challenge.
+
+Three things improved in round 3: one real file was finally opened, so the foundation is no longer
+entirely inferred; the backup landed and was verified, so the operation is reversible; and ~250 lines
+of now-dead mechanism were deleted rather than caveated, which makes the remaining mechanism easier
+to review.
 
 Three things offset them exactly. The scope grew from one dataset to **every dataset plus the index
 plus `fragment_length_counts`**, so the blast radius of a mistake is larger than what rounds 1–2
@@ -1613,9 +1826,17 @@ nothing will notice a bad repair) means the detection burden on this document we
 recovery burden went down.
 
 Resisting the upgrade is the point. The temptation after a round that deleted 250 lines and closed
-three open items is to call it an A-. But the single most important event of this round was
-discovering that the document's model of the data was wrong, and the correct response to that is not
-a higher grade.
+three open items is to call it an A-. But the single most important event of round 3 was discovering
+that the document's model of the data was wrong, and the correct response to that is not a higher
+grade. Round 4 then discovered that the document's model of the *consequences* of that data was also
+partly wrong (M2). Two consecutive rounds in which the document was found to be inaccurate about the
+thing it had just discovered is not an A- trajectory.
+
+**What would actually move this to A-**: stage 0's checklist green (especially 0.b, 0.c and 0.d),
+stage 2 executed on one restored real file with the size and runtime numbers recorded, and
+`h5repack` availability resolved. All three are evidence, not prose. None of them can be produced by
+another review round — which is the clearest signal that further review has hit diminishing returns
+and implementation should start.
 
 ### 13.1 Changes from review
 
@@ -1684,19 +1905,37 @@ Round 2 diagnosed the round-1 failure mode as *sections fixed locally without a 
 | # | Finding | How it was addressed |
 |---|---|---|
 | W | **Weight recalibration** — the irreversibility premise is false | New **§0** decides the question explicitly and asymmetrically: safety scaffolding deleted, correctness machinery retained in full, with the reason stated (nothing reads `gc`, so nothing will *notice* a bad repair — a backup does not buy detectability). Deleted: the in-tool backup step, backup verification, the per-file barrier, write-once keys, the `(source key, backup prefix, ledger)` triple, the three startup refusal checks, the `started`/`ok` two-phase protocol, the ledger header record, the 10-file rollout stage, and the typed-count prompt. §0 also records **two disagreements** with the framing given: the ledger is collapsed rather than deleted, and scale gating is unified onto `--max-files` alone. |
-| C-α | **The padding row** — a second, independent defect affecting every dataset | New **§2.2** (mechanism, three live consequences), **§3.2** (fail-closed idempotent detection predicate, delete-and-recreate mechanism with costs, index rebuild, `fragment_length_counts` rebuild), **§3.3** (ordering). Two of its consequences are **live production bugs today**: unsorted `starts` breaks `searchsorted` in the final index block, and `n_fragments` is over-reported by ~189 per file. |
+| C-α | **The padding row** — a second, independent defect affecting every dataset | New **§2.2** (mechanism, three consequences), **§3.2** (fail-closed idempotent detection predicate, delete-and-recreate mechanism with costs, index rebuild, `fragment_length_counts` rebuild), **§3.3** (ordering). **One** consequence is a live production bug today — `n_fragments` over-reported by ~189 per file; the unsorted-`starts` consequence is a **latent hazard**, not a live wrong answer (§2.2.3, corrected in round 4 after external review finding 2). |
 | C-β | **`length == 0` → 0/0 → NaN**, never mentioned in any prior round | §3.3 hazard 1: it would fire ~41,000 times. Mooted by ordering truncation first; the rule itself is retained for the general case (§3.4) and is now expected to fire **zero** times, with a nonzero count reported. |
 | C-γ | The phantom `gc = 0` on scaffolds trips the `255 → x` machinery **in reverse** | §3.3 hazards 2 and 3: a pre-truncation recompute would move `0 → 255` on ~165 scaffold contigs and abort every one of the 218; and §5 layer 3's all-255 assertion is **false as written** on all 218. Both fixed by ordering, at the source and at both restatement sites (§5 layer 3, §7.1 criterion 2). |
 | H-α | The validation oracle cannot reach the truncation path | New **§7.1.1**. Clean-for-GC ⇒ clean-for-padding, so §7.1 is a negative control only; and the whole `output_rebuild_frag_h5s/` rehearsal pool post-dates `778f4d1`. §7.4 stage 2's target changed to **a restored copy of one of the 218**. New §7.1 criterion 4 and new §7.3 structural checks incl. a **read-back query test** over the final index block. Stated plainly that a fixture covers only modelled differences. |
 | H-β | Backup-run findings supersede two specified mechanisms | §6.2 switches upload verification from SHA-256 to **CRC64NVME** — the algorithm actually exercised end-to-end on these objects with these credentials — closing round 2's §12.5 **by substitution**. §2.5 records that **ETag verification produced 218 false mismatches** (27-part multipart sources) and that `copy_object(IfNoneMatch="*")` is API-enforced write-once, tested. |
 | H-γ | The doc treats wiped `/tmp` artifacts as available inputs | §11's artifact table marks `ibd_manifest_gc_audit.tsv`, `gcpilot/*`, `objects.tsv` and `fasta_fingerprint.py` **LOST**; the REF-P12 histogram is **LOST as a file** and its regeneration is a mandatory §7.4 stage-0 task (§4.2 carries a status box). §10 states that the 218 target list now derives from the surviving backup ledger, which must be committed before stage 3. |
 | M-α | R8 — 217 files unchecked for the padding row | New §4.3 row R8 and §12.3; §7.4 stage 3 makes 218/218-all-contigs-truncated a gate; a mixed verdict within a file is blocking. |
-| M-β | Index rebuild is not a sentinel decrement | §3.2.3: the interior entries were produced by `searchsorted` over unsorted `starts`, so the index must be rebuilt from scratch by **calling** `fragments_h5.py:1225-1241` rather than reimplementing it; `INDEX_BLOCK_SIZE` read from the file's attr, not the module constant (which appears as `10000` at four other sites and `5000` at `:172`); key-set and sortedness invariants added. |
+| M-β | Index rebuild is not a sentinel decrement | §3.2.3: the interior entries were produced by `searchsorted` over unsorted `starts`, so the index is rebuilt from scratch by **calling** `fragments_h5.py:1225-1241` rather than reimplementing it. This is a *hygiene* argument, not a bug fix (§2.2.3 point 1). `INDEX_BLOCK_SIZE` read from the file's `index_block_size` attr, not the module constant — which has exactly **one** definition, `5000` at `:172`; the `10000` occurrences at `:31`, `:50`, `:72`, `:95` are module-docstring benchmarking notes, not code (corrected in round 4 after external review finding 1). Key-set and sortedness invariants added. |
 | M-γ | `fragment_length_counts` inflation was undiscovered | §2.2.3 point 3 and §3.2.4, with an **exact arithmetic identity** as the blocking check and the user-visible consequence (`n_fragments` drops by ~189/file) stated. §12.9 flags it as the more visible downstream change, since `n_fragments` is read by code that `gc` is not. |
 | M-δ | §5b's invariant was falsified by the truncation | Renarrowed to attrs + §3.2.3/§3.2.4 invariants + the `gc` region rules, with the reason stated. Restatements fixed at §3.1 step 8, §7.3, §8.1, §11 and §13.1's round-2 H-B/H-C rows. |
 | L-α | `mapq` is 2-D | §2.2.2: truncation is along **axis 0 only**; nothing may assume 1-D. §7.3 asserts `mapq` stays 2-D. |
 | L-β | Runtime and footprint models predate the rewrite | §3.6 widened to 3–8 min/file (3–8 h total) naming the rewrite as the unmodelled term; §6.1's footprint rewritten for a world where the backup is already spent (~15–25 GB net growth, not ~190–200 GB). |
 | L-γ | `_repair_history.datasets` understated the change | §9.1 now lists the truncation, the index and `fragment_length_counts`, and records `rows_removed_per_contig` — a reader seeing only `data/*/gc` would wrongly assume fragment counts were preserved. |
+
+#### Round 4 (external review, verdict B+ / approved with conditions)
+
+All eight actionable findings fixed; findings 9–12 were positive confirmations requiring no action.
+The two documentation-time conditions are folded in; the third condition (treat the findings as a
+checklist) is what this table is.
+
+| # | Finding | How it was addressed |
+|---|---|---|
+| 1 (M) | `INDEX_BLOCK_SIZE` "four other definition sites" is factually wrong | Verified independently: `:31`, `:50`, `:72`, `:95` do read `INDEX_BLOCK_SIZE = 10000`, but the module docstring runs lines 1–139, so all four are benchmarking notes. §3.2.3 now says there is exactly **one** definition (`5000` at `:172`) and names the four as docstring text. The recommendation — read `index_block_size` from the file attr — is **kept and re-argued on its own merits**: the value has changed over the format's life, `:1175` writes the live constant into the attr at build time, and `:306`/`:485` read the attr at query time, so a rebuild using the module constant would index with the wrong stride, silently. Restated at §13.1's M-β row. |
+| 2 (M) | §2.2.3's "live query-correctness bug" is overstated | §2.2.3 **rewritten**, not softened. Both `searchsorted` sites traced to completion: at query time the phantom has `stops = 0` and is unconditionally filtered by `stops > region_start` (`:538-540`), so it can never be returned; at index-build time the phantom can only push an entry from `n-1` to `n` for genomic blocks past the last real start, and the appended sentinel (`:1240`) is also `n`, so the query returns empty at `:489-490` — the correct answer for an empty block. Claim now made: **no real fragment is missed, the phantom is never returned, and the only live wrong value is `n_fragments`.** The unsorted-`starts` defect is stated as a **latent hazard** (undefined behaviour a refactor could expose), which is still sufficient reason to fix the data. Restated at §3.2.3 (index rebuild is a *hygiene* argument, not a bug fix), §7.3's read-back query test (confirms no harm, not a fixed bug), §13's round-3 finding paragraph, and §13.1's C-α row. |
+| 3 (M) | `_add_fragment_length_counts` reuse path lacks sequencing | §3.2.4 gives the explicit six-step close-and-reopen order, cites `:735`'s `__setitem__` (raises on existing key) as the reason `del` must come first, and adds two implementer notes: `__init__` caches the **stale** counts at `:312-313`, so the blocking identity must be checked against the dataset re-read from file rather than `fm_h5.n_fragments`; and `old_counts` must be captured before the `del`. |
+| 4 (M) | Files with no `gc` dataset are unaddressed | New **§3.2.5** with a three-row behaviour table: all-`gc` → full pipeline; no-`gc` → truncation + index + `fragment_length_counts` run, GC recompute / diff / §5b / §7.2 / §5-layer-3 skipped, `--fasta` optional; **partial `gc` → abort, blocking** (`has_gc` at `:360-364` is `any`, not `all`, so this state is representable). Restated at §3.1 step 4, §5's preamble, §8.2's ledger (`status: "ok_no_gc"`), §10's `--expect-fasta-sha256` rule, and §11's generality list. §2.4 already established these files exist in quantity — the alternate copy of every one of the 218 is one. |
+| 5 (L) | §3.2.2's precedent citation | Split into two precise bullets. `fragments_h5.py:1248` is precedent for in-place *creation of a new dataset*; `tests/test_build_provenance.py:109-112` is precedent for in-place *deletion of attrs* — the single-line `:109` cited previously points only at the `with` statement, and the deletions are at `:110-112`. Neither is precedent for deleting and recreating a **dataset**, which is restated as a new pattern in this repo. |
+| 6 (L) | Ledger placeholder zeros read as real values | §8.2's record now uses `"<int>"` / `"<iso8601>"` placeholders, with an explicit "this is a schema, not a sample" note and a separate sentence giving expected magnitudes. |
+| 7 (L) | Stage 0 bundles too many items in prose | §7.4's stage-0 cell reduced to a pointer; a seven-item checklist **0.a–0.g** added below the table. Item **0.c** (2-D `mapq` truncation along axis 0) is new — it was implied by §2.2.2 but was not on any test list, which is exactly the overlooked-item failure the finding predicted. |
+| 8 (L) | Cumsum cache lifetime unspecified | §3.6 specifies location (temp-dir default, so self-limiting), validity (content-addressed, never stale, no TTL), reclamation (`--rebuild-cache` for the current sha256; no deletion during a run because workers mmap the entries; path and total size printed at end of every run), and atomic `os.replace` writes so a crash leaves no half-file. |
+| cond. 2 | `h5repack` availability | Converted from an open question into an **entry gate on §7.4 stage 2**: run `h5repack --version` and record it; if absent, install `hdf5-tools` or record explicit human acceptance of the ~2× worst case. Stated at §3.2.2, in stage 2's gate cell, and at §12.4, with the reason it must be a human gate rather than a runtime branch (there is no third fallback, and a from-scratch rewrite would resurrect the attr-fidelity problem in-place mutation exists to avoid). |
 
 ---
 
