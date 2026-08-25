@@ -492,6 +492,49 @@ def test_revision_total_failure_omits_attribute(monkeypatch):
             assert fh5.build_code_revision is None
 
 
+def test_revision_written_into_real_build(monkeypatch):
+    """A real build_fragments_h5() call must actually write
+    _build_code_revision into the output file's attrs -- not merely have
+    an accessor that would return None for both a legitimate absence and a
+    broken write.
+
+    The resolver itself (_resolve_build_code_revision) is exercised in
+    isolation by the test_revision_*_branch tests above; this test does not
+    re-verify resolver logic. It monkeypatches the resolver to a fixed,
+    non-rotting sentinel value instead of asserting on whatever the ambient
+    git/dist environment happens to produce, because a real 'git:...'
+    string changes at every commit (this project has been bitten by rotting
+    hardcoded references three times) -- pinning the resolver's return value
+    lets this test assert byte-for-byte equality against the write site
+    only, which is the actual gap: everything upstream of the `f.attrs[...]
+    = _code_rev` line is already covered elsewhere.
+
+    Mutation this detects: replacing
+    `f.attrs["_build_code_revision"] = _code_rev` with `pass` (leaving the
+    `if _code_rev is not None:` guard intact) makes the attribute absent
+    from a build where the resolver is known to have returned a non-None
+    value, so `"_build_code_revision" in f.attrs` goes red. Before this
+    test, that exact mutation left all 17 tests in this file green.
+    """
+    sentinel = "git:sentinel-does-not-rot-1234567"
+    monkeypatch.setattr(fh5_module, "_resolve_build_code_revision", lambda: sentinel)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bam = os.path.join(tmpdir, "test.bam")
+        _make_simple_bam(bam)
+        h5_path = os.path.join(tmpdir, "out.h5")
+        build_fragments_h5(
+            bam, h5_path,
+            single_end=True, se_max_fragment_length=1000,
+            num_processes=1, store_fragment_end_clipped=False,
+        )
+        with h5py.File(h5_path, "r") as f:
+            assert "_build_code_revision" in f.attrs
+            assert f.attrs["_build_code_revision"] == sentinel
+        with FragmentsH5(h5_path) as fh5:
+            assert fh5.build_code_revision == sentinel
+
+
 def test_revision_old_file_degradation():
     """Files predating _build_code_revision open with build_code_revision
     == None.
