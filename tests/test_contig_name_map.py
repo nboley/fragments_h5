@@ -121,6 +121,74 @@ def test_contig_name_map_renames_output_group_and_fragments():
                 fh5.fetch_array("chrA")
 
 
+# ── Rename survives multiprocessing (SubBuildArgs pickled across a fork) ──
+
+def test_contig_name_map_renames_output_group_and_fragments_multiprocess():
+    """All other renaming tests use num_processes=1, so the rename has never
+    been exercised through pool.imap_unordered, where SubBuildArgs (holding
+    both bam_contig and output_contig) is pickled to a worker process. This
+    is exactly the code path the worker-args-refactor changed. Two contigs
+    are used so two real tasks are dispatched across 2 worker processes.
+
+    As in test_contig_name_map_renames_output_group_and_fragments, the FASTA
+    contains ONLY the output names, so a non-NaN gc array is direct evidence
+    that fasta_chrom = output_contig (fragments_h5.py:824) survived the
+    pickle round-trip and was used inside the worker, not just the group
+    name written by the main process.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        len_a, len_c = 2000, 3000
+        bam = os.path.join(tmpdir, "in.bam")
+        reads = [
+            {"name": "a0", "contig": "chrA", "pos": 100, "cigar": "10M"},
+            {"name": "a1", "contig": "chrA", "pos": 500, "cigar": "10M"},
+            {"name": "c0", "contig": "chrC", "pos": 200, "cigar": "10M"},
+            {"name": "c1", "contig": "chrC", "pos": 900, "cigar": "10M"},
+        ]
+        _write_se_bam(bam, [("chrA", len_a), ("chrC", len_c)], reads)
+
+        fasta = os.path.join(tmpdir, "ref.fa")
+        # Only the OUTPUT names are present -- a fallback to the BAM name
+        # inside the worker would find nothing in the FASTA and silently
+        # write the 255 "no gc" sentinel instead of raising.
+        _write_fasta(fasta, {"chrB": _acgt(len_a), "chrD": _acgt(len_c)})
+
+        h5 = os.path.join(tmpdir, "out.h5")
+        build_fragments_h5(
+            bam, h5, fasta_filename=fasta,
+            contig_name_map={"chrA": "chrB", "chrC": "chrD"},
+            single_end=True, se_max_fragment_length=1000,
+            num_processes=2, store_fragment_end_clipped=False,
+        )
+
+        with FragmentsH5(h5) as fh5:
+            assert set(fh5.data.keys()) == {"chrB", "chrD"}
+            assert "chrA" not in fh5.data
+            assert "chrC" not in fh5.data
+            assert fh5.contig_lengths == {"chrB": len_a, "chrD": len_c}
+
+            starts_b, _, supp_b = fh5.fetch_array("chrB", return_gc=True)
+            assert sorted(starts_b.tolist()) == [100, 500]
+            assert not numpy.isnan(supp_b["gc"]).any(), (
+                "gc for renamed contig chrB came back NaN under "
+                "num_processes=2 -- the FASTA lookup inside the worker "
+                "used the wrong (unmapped/pre-pickle) contig name"
+            )
+
+            starts_d, _, supp_d = fh5.fetch_array("chrD", return_gc=True)
+            assert sorted(starts_d.tolist()) == [200, 900]
+            assert not numpy.isnan(supp_d["gc"]).any(), (
+                "gc for renamed contig chrD came back NaN under "
+                "num_processes=2 -- the FASTA lookup inside the worker "
+                "used the wrong (unmapped/pre-pickle) contig name"
+            )
+
+            with pytest.raises(KeyError):
+                fh5.fetch_array("chrA")
+            with pytest.raises(KeyError):
+                fh5.fetch_array("chrC")
+
+
 # ── Partial map: mapped and unmapped contigs coexist ──
 
 def test_contig_name_map_partial_mapped_and_unmapped_coexist():
@@ -210,8 +278,19 @@ def test_allowed_contigs_uses_bam_names_not_output_names():
             assert set(fh5.data.keys()) == {"chrE"}
 
         # Restricting with the OUTPUT name fails -- "chrE" is not a BAM contig.
+        # This must be caught by the PRIMARY check -- the
+        # `{c: all_contig_lengths[c] for c in allowed_contigs}` comprehension
+        # (fragments_h5.py:1085) that resolves allowed_contigs against
+        # BAM-name-space lengths -- not by an incidental downstream lookup
+        # like `num_mapped_fragments[bam_contig]` (fragments_h5.py:1128),
+        # which would also raise KeyError('chrE') by coincidence (chrE never
+        # appears in bam_fp.get_index_statistics() either) even if the
+        # primary check were broken and let "chrE" slip through as a BAM
+        # name. Asserting only `pytest.raises(KeyError)` cannot distinguish
+        # these two origins, so we inspect the traceback frame where the
+        # KeyError was actually raised.
         h5_bad = os.path.join(tmpdir, "bad.h5")
-        with pytest.raises(KeyError):
+        with pytest.raises(KeyError) as exc_info:
             build_fragments_h5(
                 bam, h5_bad, fasta_filename=fasta,
                 contig_name_map={"chrA": "chrE"},
@@ -219,6 +298,12 @@ def test_allowed_contigs_uses_bam_names_not_output_names():
                 single_end=True, se_max_fragment_length=1000,
                 num_processes=1, store_fragment_end_clipped=False,
             )
+        offending_line = str(exc_info.traceback[-1].statement)
+        assert "all_contig_lengths[c]" in offending_line, (
+            "KeyError was raised from the wrong line -- expected the "
+            "allowed_contigs/all_contig_lengths comprehension (the primary "
+            f"BAM-name-space check), got: {offending_line!r}"
+        )
 
 
 # ── CLI surface: main.py --contig-name-map file parsing ──
