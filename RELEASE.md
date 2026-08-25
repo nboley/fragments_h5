@@ -91,6 +91,31 @@ remaining git-side anchor for that artifact. The tag was deleted because a label
 that points at unbuildable source is worse than no label — but the information it
 implied is preserved here rather than destroyed.
 
+**Worker-args refactor: `SubBuildArgs` replaces the positional tuple (2026-08-25, branch
+`worker-args-refactor`, merged `9430e40`).** `build_sub_fragments_h5` took a single positional
+17-element tuple; it now takes a module-scope `@dataclass(frozen=True, slots=True)`,
+`SubBuildArgs`, constructed with keyword arguments. Motivation: the tuple shipped a total
+failure in the (deleted, see above) `v2.10.1` tag — inserting `output_contig` at index 2 was
+correctly reflected at the pack and unpack sites, but not at a *third*, derived reader,
+`total_bases = sum(a[3] - a[2] for a in args)`, ~370 lines away, which then computed
+`chunk_start - output_contig` (`int - str`), raising `TypeError` on every build at
+`num_processes` 1, 2, and 4. Restoring positional access now raises
+`TypeError: 'SubBuildArgs' object is not subscriptable` — the defect class is structurally
+unreachable, not merely absent. Shipped alongside: `--contig-name-map` test coverage (zero to
+seven tests, including the multiprocessing path — it is the flag that makes `output_contig`
+differ from `bam_contig`, the exact field whose insertion caused the defect); and the
+`target_h5_path` CLI fixture switched from a bare `build-fragments-h5` under `shell=True` to
+`sys.executable -m fragments_h5.main`, fixing six tests that had been silently erroring (exit
+127) whenever pytest was launched by absolute interpreter path. Known and accepted, not
+defects: keyword construction removes ordering errors but not wrong-value binding between six
+adjacent booleans; 8 of the 17 fields are per-build invariants resent with every chunk (an
+invariant/config split is deferred); `max_tlen=1000` in `single_end_bam_to_fragments` is dead
+in the body but must not be removed (a shared call passes it unconditionally). No version bump
+— internal-only change, no external callers. See `docs/architecture/worker_args_refactor.md`.
+This changelog entry completes a documentation gate that was missed when `9430e40` merged; it
+lands here, on `build-revision-provenance`, because that branch already edits this file and the
+gap was found while doing so.
+
 **`_build_version` no longer written (2026-08-25).** Decided by the user
 after an EM critical review of the 2.12.0/2.12.1 build-provenance work above.
 `_build_version` (from installed dist-info) and `_build_code_revision` (from

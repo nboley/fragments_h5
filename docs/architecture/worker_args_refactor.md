@@ -1,6 +1,24 @@
 # Worker Argument Structure Refactor
 
-**Status:** IMPLEMENTED (Stage 1, on this branch). **Scope:** replace the 17-element positional tuple consumed by `build_sub_fragments_h5` with a module-scope, keyword-constructed dataclass, `SubBuildArgs` — now defined in `src/fragments_h5/fragments_h5.py`, immediately above `build_sub_fragments_h5`. This document was written as a proposal against tag `v2.12.1` (`b44bd7d`); it is retained here as the design record for the shipped change. Line numbers below were pinned to `v2.12.1` and describe that pre-refactor code — they are **not** current-HEAD locations. Wherever a passage describes the old positional tuple, treat it as the former state; where it discusses the current code, references have been converted to symbol/content anchors so they do not rot again (the identical class of finding has been raised three times on this project in two days).
+Status: **implemented** (Stage 1; branch `worker-args-refactor`, merged to main as `9430e40`).
+Scope: replaced the 17-element positional tuple consumed by `build_sub_fragments_h5` with a
+module-scope, keyword-constructed `@dataclass(frozen=True, slots=True)`, `SubBuildArgs`,
+defined in `src/fragments_h5/fragments_h5.py` immediately above `build_sub_fragments_h5`. See
+`AGENT_CONTEXT.md` and `RELEASE.md` for the changelog entries.
+
+**Documentation-gate note:** this design was implemented, reviewed to A-, and merged to main
+in `9430e40`, but this file's reconciliation (status line, the move out of `docs/pending/`,
+and the `AGENT_CONTEXT.md`/`RELEASE.md` cross-references) did not run at merge time. It is
+completed here, on branch `build-revision-provenance`, because that branch already touches
+the same two files and the gap was noticed while doing so — not because the work belongs to
+that branch's own feature.
+
+This document was written as a proposal against tag `v2.12.1` (`b44bd7d`); it is retained here
+as the design record for the shipped change. Line numbers below were pinned to `v2.12.1` and
+describe that pre-refactor code — they are **not** current-HEAD locations. Wherever a passage
+describes the old positional tuple, treat it as the former state; where it discusses the
+current code, references have been converted to symbol/content anchors so they do not rot
+again (the identical class of finding has been raised three times on this project in two days).
 
 Every empirical claim is marked **EXECUTED** (observed in this session unless stated) or **INFERRED**. Unrun code is labelled `# PROPOSED`.
 

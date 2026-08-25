@@ -123,12 +123,41 @@ Optimization: Use block index to reduce searchsorted range
 
 **Worker Workflow:**
 ```python
-def build_sub_fragments_h5(args):
-    # args = (bam_path, contig, chunk_start, chunk_stop, contig_length, ...)
+@dataclass(frozen=True, slots=True)
+class SubBuildArgs:
+    input_fname: str
+    bam_contig: str
+    output_contig: str
+    chunk_start: int
+    chunk_stop: int
+    contig_length: int
+    fasta_filename: Optional[str]
+    single_end: bool
+    se_max_fragment_length: Optional[int]
+    read_gc: bool
+    read_strand: bool
+    read_methyl: bool
+    set_mapq_255_to_none: bool
+    include_duplicates: bool
+    store_fragment_end_clipped: bool
+    tmp_dir_name: str
+    min_mapq: Optional[int]
+
+def build_sub_fragments_h5(args: SubBuildArgs):
     # Worker fetches BAM region [chunk_start, chunk_stop) and filters fragments by start position
     # FASTA fetched for region [chunk_start, chunk_stop + MAX_FRAG_LENGTH) for GC calculation
-    # Returns (contig, chunk_start, chunk_stop, temp_h5_path)
+    # Returns (output_contig, chunk_start, chunk_stop, temp_h5_path_or_None)
 ```
+
+**`SubBuildArgs` (added in the worker-args refactor, `9430e40`):** replaces a 17-element
+positional tuple that shipped a released defect (see changelog below and
+`docs/architecture/worker_args_refactor.md`). Constructed with keywords only at the single
+pack site inside `build_fragments_h5`'s contig × chunk loop; unpacked via 17 one-to-one
+`args.<field>` rebinds at the top of `build_sub_fragments_h5`. `args[i]`-style access now
+raises `TypeError: 'SubBuildArgs' object is not subscriptable` — the class of bug that broke
+every build in the deleted `v2.10.1` tag is structurally unreachable. The 4-element return
+tuple above is a separate, still-positional shape, deliberately out of scope for that refactor
+(no defect history, unpacked immediately at both consumers).
 
 ---
 
@@ -216,8 +245,9 @@ def build_fragments_h5(input_fname, ofname, fasta_filename=None,
                       *, build_argv=None):
     """Main entry point for building fragment H5 from BAM or TSV/BED"""
 
-def build_sub_fragments_h5(args):
-    """Worker function — processes one chunk (contig, chunk_start, chunk_stop)"""
+def build_sub_fragments_h5(args: SubBuildArgs):
+    """Worker function — processes one chunk (contig, chunk_start, chunk_stop).
+    `args` is a module-scope `SubBuildArgs` dataclass (§2.3), not a positional tuple."""
 ```
 
 #### `fragment.py` (Data Classes and BAM Parsing)
@@ -1107,6 +1137,33 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 
 ---
 
+### Unreleased (worker-args-refactor branch, merged `9430e40`)
+- **`SubBuildArgs` replaces the 17-element positional worker-args tuple:** `build_sub_fragments_h5`
+  now takes a module-scope `@dataclass(frozen=True, slots=True)`, constructed with keywords only
+  at the pack site in `build_fragments_h5`. Motivation: the positional tuple shipped a total
+  failure in the (since-deleted) `v2.10.1` tag — inserting `output_contig` at index 2 left a
+  *third*, derived reader (`total_bases = sum(a[3] - a[2] for a in args)`, ~370 lines from the
+  pack/unpack sites) computing `chunk_start - output_contig` (`int - str`), raising `TypeError`
+  on every build at `num_processes` 1, 2, and 4. Pack and unpack were kept in sync at every
+  historical insertion; this third accessor was not. Under `SubBuildArgs`, `args[i]` raises
+  `TypeError: 'SubBuildArgs' object is not subscriptable` — the defect class is now structurally
+  unreachable, not merely absent. See `docs/architecture/worker_args_refactor.md`.
+- **`--contig-name-map` test coverage:** went from zero test references to seven
+  (`tests/test_contig_name_map.py`), including the multiprocessing path — the flag that makes
+  `output_contig` differ from `bam_contig`, the exact field whose insertion caused the defect
+  above.
+- **`target_h5_path` test fixture** now invokes `sys.executable -m fragments_h5.main` instead of
+  a bare `build-fragments-h5` under `shell=True`. Six CLI integration tests had been erroring at
+  setup (exit 127) whenever pytest was launched by absolute interpreter path.
+- **Known and accepted, not defects:** keyword construction removes *ordering* errors but not
+  wrong-*value* binding — six adjacent booleans (`read_gc`, `read_strand`, `read_methyl`,
+  `set_mapq_255_to_none`, `include_duplicates`, `store_fragment_end_clipped`) remain mutually
+  substitutable. 8 of the 17 fields are per-build invariants resent with every chunk; only 4 vary
+  per task — an invariant/config split would address it and is deliberately deferred.
+  `max_tlen=1000` in `single_end_bam_to_fragments` (`fragment.py:559`) is dead in the function
+  body but must not be removed: a shared call passes it unconditionally, and removing it raises
+  `TypeError` on every single-end build.
+
 ### Unreleased (fragment-selection-and-provenance branch)
 - **Secondary alignment exclusion:** `is_secondary` now excluded in both paired-end (`bam_to_align`) and single-end (`single_end_bam_to_fragments`) filters. Unconditional, no flag. Measured impact on current data: zero (0 secondary alignments in ~61k sampled reads across fixtures and two production BAMs, because `bwa-mem2`/`bowtie2` are not given `-a`/`-k`). If an aligner config ever gains `-a`/`-k`, this becomes material.
 - **SE over-length span raises `ValueError`:** When `se_max_fragment_length` is unset, a single-end read whose reference span exceeds 65535 now raises `ValueError` with contig, position, read name, and CIGAR — instead of an opaque `OverflowError` from inside a multiprocessing worker. When `se_max_fragment_length` is set, over-long spans are still silently skipped.
@@ -1145,6 +1202,6 @@ was the right fix.
 - **Single-process optimization:** When num_processes=1, work runs in-process without forking.
 - **Bug fix:** `contig_lengths` computation with `--contigs` filter was pairing contig names with wrong lengths.
 
-**Document Version:** 1.4
+**Document Version:** 1.5
 **Last Updated:** 2026-08-25
 **Generated for:** Debugging and development assistance
