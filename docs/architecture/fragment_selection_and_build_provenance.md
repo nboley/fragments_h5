@@ -622,10 +622,11 @@ matching `pyproject.toml:7`. But an editable install with stale metadata reports
 stale version — this exact repo previously had dist-info reporting 2.9.1 while
 the tree said 2.11.0. So `_build_version` pins the *installed distribution*,
 which is exactly right for containers and can mislead in a dev checkout. Related:
-the `Makefile` `docker-build` target does **not** check tree cleanliness even
-though `tag` does, so `RELEASE.md:148`'s claim that a version mismatch is "not
-possible" is false — a container can be built from a dirty tree, and
-`_build_version` would then not fully identify the code. Not fixed here; noted.
+the `Makefile` `docker-build` target now gates on tree cleanliness, the
+`docker-build` counterpart of the `tag` target's `pyproject.toml` check: it
+refuses to build when there are tracked changes (staged or unstaged) or any
+untracked files. This closes the gap that previously let a container be built
+from a dirty tree with a stale version.
 
 If `importlib.metadata.PackageNotFoundError` is raised (uninstalled tree), omit
 the attribute rather than writing a sentinel like `"unknown"`. Absent means

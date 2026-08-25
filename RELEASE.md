@@ -207,5 +207,5 @@ evidence — confirm what a container contains by running it.
 ## Troubleshooting
 
 - **Docker push fails**: Ensure `gh auth login` is completed
-- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and the `tag` target refuses to tag when `pyproject.toml` is uncommitted. However, `docker-build` has no such check, so a Docker image *can* be built from a dirty tree with a stale version. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
+- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and the `tag` target refuses to tag when `pyproject.toml` is uncommitted. `docker-build` now has the equivalent check (it refuses to build from a tree with tracked or untracked changes) — this claim was accurate when written but had gone stale; the `_build_code_revision` feature closed the gap. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
 - **Conda build fails**: Ensure conda-forge and bioconda channels are available

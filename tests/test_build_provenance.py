@@ -267,6 +267,69 @@ def test_revision_gate_rejects_untracked_copy(monkeypatch):
         f"untracked copy should not get git: prefix, got {result!r}"
 
 
+def test_revision_untracked_suffix(monkeypatch):
+    """An untracked file anywhere in the repo (the tracked package file
+    itself unmodified) makes the result carry the '-untracked' suffix.
+
+    Mutation this detects: removing the ls-files --others --exclude-standard
+    check (or the `revision += "-untracked"` line) makes '-untracked' absent
+    from the result, and this test's `in result` assertion goes red.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
+        pkg_src = fh5_module.__file__
+        dest = os.path.join(tmpdir, os.path.basename(pkg_src))
+        shutil.copy2(pkg_src, dest)
+        subprocess.run(["git", "-C", tmpdir, "add", os.path.basename(dest)],
+                        capture_output=True, check=True)
+        subprocess.run(["git", "-C", tmpdir, "commit", "-m", "init"],
+                        capture_output=True, check=True)
+
+        # An unrelated untracked file, unrelated to the package file itself.
+        with open(os.path.join(tmpdir, "scratch.txt"), "w") as f:
+            f.write("untracked\n")
+
+        monkeypatch.setattr(fh5_module, "__file__", dest)
+        result = _resolve_build_code_revision()
+
+    assert result is not None
+    assert result.startswith("git:")
+    assert "-untracked" in result, f"expected '-untracked' in {result!r}"
+
+
+def test_revision_dirty_without_untracked_suffix(monkeypatch):
+    """A tracked-file modification with no untracked files present yields
+    '-dirty' (from `git describe --dirty`) but must NOT also carry
+    '-untracked' -- the two suffixes are genuinely distinct signals.
+
+    Mutation this detects: keying the '-untracked' suffix off a signal that
+    also fires for ordinary dirtiness (e.g. `git status --porcelain`, which
+    reports untracked files with the same leading marker as modified ones)
+    would make '-untracked' incorrectly appear here.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        subprocess.run(["git", "init", tmpdir], capture_output=True, check=True)
+        pkg_src = fh5_module.__file__
+        dest = os.path.join(tmpdir, os.path.basename(pkg_src))
+        shutil.copy2(pkg_src, dest)
+        subprocess.run(["git", "-C", tmpdir, "add", os.path.basename(dest)],
+                        capture_output=True, check=True)
+        subprocess.run(["git", "-C", tmpdir, "commit", "-m", "init"],
+                        capture_output=True, check=True)
+
+        # Modify the tracked package file itself -- no untracked files exist.
+        with open(dest, "a") as f:
+            f.write("\n# scratch modification\n")
+
+        monkeypatch.setattr(fh5_module, "__file__", dest)
+        result = _resolve_build_code_revision()
+
+    assert result is not None
+    assert result.startswith("git:")
+    assert "-dirty" in result, f"expected '-dirty' in {result!r}"
+    assert "-untracked" not in result, f"unexpected '-untracked' in {result!r}"
+
+
 def test_revision_baked_branch(monkeypatch):
     """When git is unavailable but _build_revision.py exists, the resolver
     returns 'baked:<value>'.
