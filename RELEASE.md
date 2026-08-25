@@ -59,6 +59,37 @@ The version is automatically read from `pyproject.toml` (currently **2.11.0**).
   `/cwd/s3:/b/k.bam`. Remote URLs are now left untouched; local paths are
   still absolutized for worker CWD independence.
 
+**Correction (added 2026-08-24):** The merge commit for this release (`aa753c7`)
+stated that `build_se_fragment_h5s.nf`'s container "has neither" flag and that
+`errorStrategy 'ignore'` made the resulting argparse failure silent, so "those
+samples simply produced no h5." Both claims are false, per direct measurement:
+the `ghcr.io/nboley/fragments-h5:2.10.1` *image* does have both flags (it was
+built from a tree ahead of the `v2.10.1` git tag, which lacks them); and all 48
+expected h5 files for the affected project exist in S3, built successfully.
+Separately, `build_se_fragment_h5s.config`'s `standard` profile sets
+`errorStrategy = 'terminate'` (loud); only the `remote` profile retries twice
+then falls back to `'ignore'`. The recurring lesson: a git tag is not evidence
+of what a container contains — verify a container by running it, not by
+reading the tag it was built from. What the release did correctly: the CLI
+flags genuinely were unreachable from `main.py` before this work, and exposing
+them was the right fix.
+
+**Tag `v2.10.1` deleted (2026-08-24), local and origin.** It pointed at commit
+`dbed0ae` (a merge dated 2026-06-08), which declares `version = "2.10.0"` — no
+`v2.10.0` tag ever existed — and whose source cannot build an h5 at all:
+`total_bases = sum(a[3] - a[2] ...)` computed `chunk_start - output_contig`,
+raising `TypeError: unsupported operand type(s) for -: 'int' and 'str'`. That
+accessor drifted when `output_contig` was inserted at tuple index 2; the pack and
+unpack sites were both updated correctly and this third reader, 390 lines away,
+was not. Verified by execution at `num_processes` 1, 2 and 4.
+
+The SHA is recorded here deliberately. The 48 h5 files referenced above were
+built by the `ghcr.io/nboley/fragments-h5:2.10.1` **image**, which works and is
+unaffected by the tag's removal; with the tag gone, this note is the only
+remaining git-side anchor for that artifact. The tag was deleted because a label
+that points at unbuildable source is worse than no label — but the information it
+implied is preserved here rather than destroyed.
+
 ### v2.7.0 (2026-02-11)
 
 **Fixed:**
@@ -168,6 +199,10 @@ After pushing, verify the Docker image:
 docker pull ghcr.io/nboley/fragments-h5:2.11.0
 docker run --rm ghcr.io/nboley/fragments-h5:2.11.0 build-fragments-h5 --help
 ```
+
+This is not optional flourish: an image can be built from a tree ahead of its
+git tag (see the v2.11.0 correction note above). Treat the tag as a label, not
+evidence — confirm what a container contains by running it.
 
 ## Troubleshooting
 

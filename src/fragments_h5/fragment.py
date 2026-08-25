@@ -37,7 +37,7 @@ class MethylCounts:
             yield key, getattr(self, key)
 
     @classmethod
-    def init_from_yn_tag(cls, tag_str):
+    def init_from_ym_tag(cls, tag_str):
         return cls(*map(int, cls._machine.fullmatch(tag_str).groups()))
 
 
@@ -518,7 +518,7 @@ def bam_to_fragments(
             cell_barcode = None
 
         if align.has_tag("YM"):
-            methyl_counts = MethylCounts.init_from_yn_tag(align.get_tag("YM"))
+            methyl_counts = MethylCounts.init_from_ym_tag(align.get_tag("YM"))
         else:
             methyl_counts = None
 

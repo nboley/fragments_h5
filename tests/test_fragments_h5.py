@@ -2,6 +2,7 @@ import logging
 import os
 import pytest
 import subprocess
+import sys
 import tempfile
 import unittest.mock
 
@@ -67,15 +68,15 @@ def target_h5_path(target_bam_path, fasta_file_path):
             dirname, "scATAC_breast_v1.chr6_99118615_99121634.fragments.h5"
         )
 
-        cmd = f"""
-        build-fragments-h5 \
-            {target_bam_path} \
-            {ofname} \
-            --contigs chr6 \
-            --fasta {fasta_file_path} \
-            --verbose \
-        """.strip()
-        subprocess.run(cmd, shell=True, check=True)
+        cmd = [
+            sys.executable, "-m", "fragments_h5.main",
+            target_bam_path,
+            ofname,
+            "--contigs", "chr6",
+            "--fasta", fasta_file_path,
+            "--verbose",
+        ]
+        subprocess.run(cmd, check=True)
         yield ofname
 
 
