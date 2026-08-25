@@ -32,6 +32,7 @@ Repository = "https://github.com/nboley/fragments_h5"
 
 [project.scripts]
 build-fragments-h5 = "fragments_h5.main:main"
+repair-fragments-h5-gc = "fragments_h5.repair:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
