@@ -622,11 +622,12 @@ matching `pyproject.toml:7`. But an editable install with stale metadata reports
 stale version — this exact repo previously had dist-info reporting 2.9.1 while
 the tree said 2.11.0. So `_build_version` pins the *installed distribution*,
 which is exactly right for containers and can mislead in a dev checkout. Related:
-the `Makefile` `docker-build` target now gates on tree cleanliness, the
-`docker-build` counterpart of the `tag` target's `pyproject.toml` check: it
-refuses to build when there are tracked changes (staged or unstaged) or any
-untracked files. This closes the gap that previously let a container be built
-from a dirty tree with a stale version.
+all artifact-producing `Makefile` targets (`conda-build`, `docker-build`, `tag`)
+now depend on a shared `require-clean-tree` prerequisite, which refuses to
+proceed when the working tree has tracked changes (staged or unstaged) or
+untracked files. `tag` additionally has a `check-pyproject-clean` prerequisite
+(ordered first, for a tailored diagnostic). This closes the gap that previously
+let artifacts be built from a dirty tree with a stale version.
 
 If `importlib.metadata.PackageNotFoundError` is raised (uninstalled tree), omit
 the attribute rather than writing a sentinel like `"unknown"`. Absent means
@@ -869,7 +870,7 @@ patching. Anchor on the quoted code, not the number, from step two onward.
   `bam_to_fragments` has no `**kwargs`, which invites the wrong conclusion about
   the third branch.
 - `:916-934` add keyword-only `build_argv=None`
-- `:1147-1151` write `_build_argv` (when provided) and `_build_version`
+- `:1147-1151` write `_build_argv` (when provided) and `_build_code_revision` (when resolver returns non-`None`; `_build_version` no longer written per Addendum)
 - `:288-304` read both back via `.attrs.get()`
 
 `src/fragments_h5/main.py`
@@ -932,8 +933,8 @@ in `tests/`; keep fixtures local to each module, matching the existing layout.
 **`tests/test_build_provenance.py` (new)**
 
 - `test_provenance_absent_for_library_caller` — direct `build_fragments_h5(...)`.
-  Assert `_build_argv` not in `f.attrs` and `_build_version` equals
-  `importlib.metadata.version("fragments-h5")`.
+  Assert `_build_argv` not in `f.attrs` and `_build_version` not in `f.attrs`
+  (no longer written per Addendum; originally asserted equality with installed version).
 - `test_provenance_recorded_when_argv_passed` — pass an explicit
   `build_argv=['build-fragments-h5', 'in.bam', 'out.h5', '--single-end']`.
   Assert `json.loads(f.attrs['_build_argv'])` round-trips exactly, including

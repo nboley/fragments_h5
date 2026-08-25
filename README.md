@@ -134,7 +134,8 @@ fragment_length_counts : an array of fragment counts for each fragment length fr
 n_fragments            : total number of fragments (sum of fragment_length_counts)
 source_format          : "BAM" or "TSV" (the input format used to build the h5)
 build_argv             : list of CLI arguments used to build the h5, or None (library callers / pre-provenance files)
-build_version          : package version string of the builder, or None (uninstalled tree / pre-provenance files)
+build_code_revision    : self-labeling revision string (e.g. "git:v2.12.1-2-g704a630"), or None
+build_version          : package version string of the builder, or None (legacy; no longer written to new files)
 ```
 
 #### FragmentsH5.init(...)

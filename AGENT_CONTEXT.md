@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
-**Last Updated:** 2026-08-21
-**Version:** 2.11.0
+**Last Updated:** 2026-08-25
+**Version:** 2.12.1
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -20,7 +20,7 @@
 - tqdm progress bar during build (weighted by contig length)
 - S3/GS/HTTP streaming support for BAM and FASTA files (any htslib-supported scheme)
 - Optional metadata: GC content, strand, mapping quality, methylation, fragment clipping status
-- Build provenance: `_build_argv` (CLI invocations) and `_build_version` recorded in the h5
+- Build provenance: `_build_argv` (CLI invocations) and `_build_code_revision` (self-labeling revision string) recorded in the h5. `_build_version` is read-only (no longer written to new files)
 
 **Target Use Cases:**
 - Cell-free DNA analysis and fragmentomics research
@@ -31,7 +31,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.11.0
+- **Version:** 2.12.1
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
@@ -59,7 +59,8 @@
 │   ├── _source_format            [str, "BAM" or "TSV"]
 │   ├── _contig_lengths_str       [str, Python dict literal]
 │   ├── _build_argv               [str, JSON array] (optional, CLI builds only)
-│   └── _build_version            [str] (optional, absent if package not installed)
+│   ├── _build_code_revision      [str] (optional, self-labeling: "git:...", "baked:...", "dist:...", "dist-editable:...")
+│   └── _build_version            [str] (legacy, read-only; written only by 2.12.0/2.12.1, no longer written to new files)
 ├── data/
 │   └── {contig}/
 │       ├── starts          [int32, sorted]
@@ -162,7 +163,8 @@ fragments_h5/
 │   └── conda_build_config.yaml
 ├── docs/
 │   ├── architecture/
-│   │   └── fragment_selection_and_build_provenance.md
+│   │   ├── fragment_selection_and_build_provenance.md
+│   │   └── build_version_provenance_correctness.md
 │   └── plan_chunk_based_parallelization.md
 ├── pyproject.toml              # pip package metadata
 ├── setup.py                    # Cython extension build
@@ -200,7 +202,7 @@ class FragmentsH5:
     # Properties: filename, name, has_methyl, has_strand,
     #            has_fragment_end_clipped, max_fragment_length,
     #            fragment_length_counts, n_fragments,
-    #            build_argv, build_version, source_format
+    #            build_argv, build_version, build_code_revision, source_format
 ```
 
 **Build Functions:**
@@ -389,13 +391,14 @@ make docker
 
 | Target | Description |
 |--------|-------------|
-| `conda-build` | Build conda package with rattler-build |
+| `require-clean-tree` | Whole-tree cleanliness gate (tracked + untracked); prerequisite of `conda-build`, `docker-build`, `tag` |
+| `conda-build` | Build conda package with rattler-build (requires clean tree) |
 | `conda-publish` | Upload to JFrog Artifactory (requires credentials) |
 | `conda` | Build + publish conda |
-| `docker-build` | Build Docker image |
+| `docker-build` | Build Docker image (requires clean tree; bakes `git describe` via `--build-arg`) |
 | `docker-push` | Push to GHCR (requires gh auth) |
 | `docker` | Build + push Docker |
-| `tag` | Create and push git tag v$(VERSION) |
+| `tag` | Create and push git tag v$(VERSION) (requires clean tree + uncommitted pyproject.toml check) |
 | `all` | conda + docker + tag + clean |
 | `clean` | Remove build artifacts |
 
@@ -631,8 +634,9 @@ print(fh5.has_strand)
 print(fh5.has_methyl)
 
 # Build provenance (None for files built before this feature)
-print(fh5.build_argv)      # list of CLI args, or None
-print(fh5.build_version)   # package version string, or None
+print(fh5.build_argv)            # list of CLI args, or None
+print(fh5.build_code_revision)   # self-labeling revision string (e.g. "git:v2.12.1-2-g704a630"), or None
+print(fh5.build_version)         # package version string, or None (legacy; no longer written to new files)
 ```
 
 **Build Programmatically:**
@@ -653,7 +657,7 @@ build_fragments_h5(
     include_duplicates=False,
     store_fragment_end_clipped=True,
     min_mapq=30,
-    # build_argv is keyword-only; omit for library callers (records _build_version only)
+    # build_argv is keyword-only; omit for library callers (records _build_code_revision only)
     # CLI passes build_argv=sys.argv automatically
 )
 ```
@@ -1108,7 +1112,7 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 - **SE over-length span raises `ValueError`:** When `se_max_fragment_length` is unset, a single-end read whose reference span exceeds 65535 now raises `ValueError` with contig, position, read name, and CIGAR — instead of an opaque `OverflowError` from inside a multiprocessing worker. When `se_max_fragment_length` is set, over-long spans are still silently skipped.
 - **`num_mapped` fix:** `num_mapped_alignments` (formerly `num_mapped`) no longer halves the alignment count with `// 2`. A single-end contig with exactly one mapped read is no longer silently dropped.
 - **S3 input fix:** `os.path.abspath` was mangling `s3://b/k.bam` into `/cwd/s3:/b/k.bam`. Remote URLs are now detected by a generic scheme regex and left untouched. Also covers `gs://`, `https://`, `ftp://`, etc.
-- **Build provenance:** New h5 attributes `_build_argv` (JSON array, CLI builds only) and `_build_version` (package version string). Exposed as `FragmentsH5.build_argv` and `FragmentsH5.build_version`. Both return `None` on files that predate this feature. `build_argv` is keyword-only in `build_fragments_h5()`; library callers get `_build_version` only.
+- **Build provenance:** New h5 attributes `_build_argv` (JSON array, CLI builds only) and `_build_code_revision` (self-labeling revision string). Exposed as `FragmentsH5.build_argv`, `FragmentsH5.build_code_revision`, and `FragmentsH5.build_version` (legacy read-only). `_build_version` is no longer written to new files; `build_version` returns `None` except for files built by 2.12.0/2.12.1. `build_argv` is keyword-only in `build_fragments_h5()`; library callers get `_build_code_revision` only.
 - **`numpy>=1.24` floor:** Added to `pyproject.toml` dependencies. Ensures out-of-range uint16 assignment always raises, closing the last environment-dependent failure mode.
 
 ### v2.11.0 Changelog
@@ -1141,6 +1145,6 @@ was the right fix.
 - **Single-process optimization:** When num_processes=1, work runs in-process without forking.
 - **Bug fix:** `contig_lengths` computation with `--contigs` filter was pairing contig names with wrong lengths.
 
-**Document Version:** 1.3
-**Last Updated:** 2026-08-21
+**Document Version:** 1.4
+**Last Updated:** 2026-08-25
 **Generated for:** Debugging and development assistance

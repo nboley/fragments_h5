@@ -13,7 +13,7 @@ This guide explains how to build and push Docker images and packages after makin
 
 ## Current Version
 
-The version is automatically read from `pyproject.toml` (currently **2.11.0**).
+The version is automatically read from `pyproject.toml` (currently **2.12.1**).
 
 ## Changelog
 
@@ -28,11 +28,12 @@ The version is automatically read from `pyproject.toml` (currently **2.11.0**).
 - CLI validation: range checks, mutual requirement of `--single-end` and
   `--se-max-fragment-length` (BAM only).
 - First CLI-level tests; mutation-verified coverage for the SE filter gate.
-- Build provenance: `_build_argv` and `_build_version` h5 attributes record CLI
-  arguments (JSON) and the installed package version. Exposed as
-  `FragmentsH5.build_argv` and `.build_version`; both return `None` for files
-  built before this feature. `build_argv` is recorded only for CLI builds —
-  library callers get `_build_version` only.
+- Build provenance: `_build_argv` and `_build_code_revision` h5 attributes record
+  CLI arguments (JSON) and a self-labeling code revision string. Exposed as
+  `FragmentsH5.build_argv`, `.build_code_revision`, and `.build_version` (legacy
+  read-only). `_build_version` is no longer written to new files (see note below);
+  `build_argv` is recorded only for CLI builds — library callers get
+  `_build_code_revision` only.
 - `numpy>=1.24` dependency floor in `pyproject.toml`, ensuring out-of-range
   uint16 assignment always raises (closes environment-dependent failure mode).
 
@@ -102,6 +103,15 @@ by 2.12.0 and 2.12.1, but is no longer written to new files. No format
 version bump. See
 `docs/architecture/fragment_selection_and_build_provenance.md`'s 2026-08-25
 addendum for the full rationale.
+
+**`require-clean-tree` guards all artifact-producing targets (2026-08-25).**
+`conda-build`, `docker-build`, and `tag` now all depend on a shared
+`require-clean-tree` Makefile prerequisite. It refuses to proceed when the
+working tree has tracked changes (staged or unstaged) or untracked files.
+`tag` additionally keeps its `check-pyproject-clean` prerequisite (ordered
+first for a tailored diagnostic). This closes the asymmetry where some
+artifact types were gated and others were not — the root cause of the
+v2.10.1 image/tag mismatch.
 
 ### v2.7.0 (2026-02-11)
 
@@ -220,5 +230,5 @@ evidence — confirm what a container contains by running it.
 ## Troubleshooting
 
 - **Docker push fails**: Ensure `gh auth login` is completed
-- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and the `tag` target refuses to tag when `pyproject.toml` is uncommitted. `docker-build` now has the equivalent check (it refuses to build from a tree with tracked or untracked changes) — this claim was accurate when written but had gone stale; the `_build_code_revision` feature closed the gap. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
+- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and all artifact-producing targets (`conda-build`, `docker-build`, `tag`) depend on `require-clean-tree`, which refuses to proceed when the working tree has tracked or untracked changes. `tag` additionally has a `check-pyproject-clean` prerequisite with a tailored diagnostic. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
 - **Conda build fails**: Ensure conda-forge and bioconda channels are available
