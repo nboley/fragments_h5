@@ -1,8 +1,12 @@
 # GC Repair Tool
 
-> **Status: PROPOSAL, awaiting approval. Nothing here has been implemented and nothing has been
-> run against production data.** Target release: **v2.13.0**. Execution against the 218 production
-> files requires a *separate* explicit approval beyond approving this design — see §10.
+> **Status: IMPLEMENTED — the tool exists at `src/fragments_h5/repair.py` with a full test suite
+> (`tests/test_gc_repair.py`), registered as the `repair-fragments-h5-gc` console script. It has
+> NOT been run against production data.** Execution against the 218 production files requires a
+> *separate* explicit approval beyond approving this design — see §10.
+>
+> The architecture-level summary lives at `docs/architecture/gc_repair_tool.md`. This document is
+> retained as the full design record, including review history and correctness arguments.
 >
 > Version bookkeeping: `main` is tagged v2.12.1 but `pyproject.toml:7` in this worktree reads
 > `2.12.0`. The implementing PR must reconcile that and set it to `2.13.0`; the tool reads its own
