@@ -126,7 +126,15 @@ def test_contig_name_map_renames_output_group_and_fragments():
 def test_contig_name_map_partial_mapped_and_unmapped_coexist():
     """A map covering only some contigs must rename exactly those, leaving the
     rest under their original BAM name in the SAME output file
-    (fragments_h5.py:1065 `_map_name = lambda c: contig_name_map.get(c, c)`)."""
+    (fragments_h5.py:1065 `_map_name = lambda c: contig_name_map.get(c, c)`).
+
+    The FASTA carries both chrB (chrA's renamed target) and chrC (unchanged).
+    Fetching gc for both confirms the per-contig FASTA lookup uses the right
+    name in each case -- for chrB that means `fasta_chrom = output_contig if
+    output_contig != bam_contig else None` (fragments_h5.py:824) must resolve
+    to the renamed name, not silently fall back to "chrA" (which isn't even
+    in the FASTA). See test_contig_name_map_renames_output_group_and_fragments
+    for why NaN-vs-real gc is the signal that catches a wrong-name lookup."""
     with tempfile.TemporaryDirectory() as tmpdir:
         len_a, len_c = 2000, 3000
         bam = os.path.join(tmpdir, "in.bam")
@@ -155,11 +163,19 @@ def test_contig_name_map_partial_mapped_and_unmapped_coexist():
             assert "chrA" not in fh5.data
             assert fh5.contig_lengths == {"chrB": len_a, "chrC": len_c}
 
-            starts_b, _, _ = fh5.fetch_array("chrB")
+            starts_b, _, supp_b = fh5.fetch_array("chrB", return_gc=True)
             assert sorted(starts_b.tolist()) == [100, 500]
+            assert not numpy.isnan(supp_b["gc"]).any(), (
+                "gc for renamed contig chrB came back NaN -- FASTA lookup "
+                "used the wrong (unmapped) contig name"
+            )
 
-            starts_c, _, _ = fh5.fetch_array("chrC")
+            starts_c, _, supp_c = fh5.fetch_array("chrC", return_gc=True)
             assert sorted(starts_c.tolist()) == [200, 900]
+            assert not numpy.isnan(supp_c["gc"]).any(), (
+                "gc for unmapped contig chrC came back NaN -- FASTA lookup "
+                "used the wrong contig name"
+            )
 
 
 # ── --contigs / allowed_contigs interaction ──
