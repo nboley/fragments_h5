@@ -699,12 +699,16 @@ is not an acceptable non-answer:
   `os.replace`d into place, so a crash mid-write leaves no half-file for the next run to mmap.
 
 This is ~30 lines and it deletes the entire memory-pressure question, so it clears the "not
-over-engineered" bar. If it is rejected, the fallback is: no cache, `--num-processes 4`
+over-engineered" bar. If it is rejected, the fallback is: no cache, four concurrent workers
 (4 × 6 GB = 24 GB peak against the **96 GB available** on this 16-CPU host, of 124 GB total), which
 also works but re-encodes the genome 218 times.
 
-Default `--num-processes 4`; one *file* per worker (not one contig per worker) so that the
-download/truncate/repair/upload sequence for a file is owned end-to-end by a single process.
+**Parallelism is not implemented** (round-5 finding L-1). The tool processes targets sequentially and
+has no `--num-processes` flag; if the measured per-file time makes 218 files unacceptable, the unit of
+parallelism is one *file* per worker (not one contig per worker), so the
+download/truncate/repair/upload sequence for a file is owned end-to-end by a single process. Until
+that is built, "run four of them against disjoint target lists" is the whole story, and it needs no
+code.
 
 **Runtime — an estimate, not a measurement.** Basis: a full gzip-decompress + per-byte histogram
 pass over this FASTA took **~5 min** in pure Python and **~2 min** numpy-vectorized (measured, §4.2).
@@ -712,7 +716,8 @@ Cache build is therefore ~5 min one-shot. Per file: ~740 MB down + **more than 7
 budget the upload leg at ~1.2–1.5× the download leg until stage 2 measures it, plus the truncation
 rewrite (~1,200–1,900 delete-and-creates over gzip-compressed data — **the one cost with no
 empirical basis at all**, and a plausible new bottleneck) plus the recompute. Call it **3–8
-min/file**, wider than round 2's 2–5 because of the rewrite. At `--num-processes 4` and 218 files
+min/file**, wider than round 2's 2–5 because of the rewrite. At four concurrent invocations over
+disjoint target lists and 218 files
 that is roughly **3–8 hours wall-clock** for the full apply, plus ~1–2 hours for the §7.4 stage-3
 dry-run gate across all 218 (download-bound, no upload). **Every number in this paragraph is an
 estimate**; the stage-2 rehearsal produces the first real datum and the runbook should record it.
@@ -899,10 +904,13 @@ not because the check is inconvenient.
 
 1. **`--fasta` is required and has no default.** No environment fallback, no "guess from the
    manifest", no hardcoded S3 URI anywhere in the package.
-2. **FASTA identity is recorded and pinned.** Preflight computes `sha256` of the FASTA (and of its
-   `.fai`), prints it, and writes it into the ledger and into the repaired file's provenance (§9).
+2. **FASTA identity is recorded and pinned.** Preflight computes `sha256` of the FASTA, prints it,
+   and writes it into the ledger and into the repaired file's provenance (§9).
    `--expect-fasta-sha256 <hex>` is **required in `--apply` mode** and aborts the whole run on
-   mismatch, so the runbook can pin the exact bytes.
+   mismatch, so the runbook can pin the exact bytes. The `.fai` is deliberately **not** hashed: it is
+   derived from the FASTA by `samtools faidx` and contains no sequence bytes, so a `.fai` that
+   disagreed with the FASTA it indexes would either fail to load or yield coordinates that layer 3's
+   geometry checks reject. Hashing it would be a second thing to pin that pins nothing new.
 3. **Per-file structural fingerprint, before any write.** For every contig group under `data/` in
    the H5. **All `gc` content assertions in this layer are evaluated on the truncated arrays
    (§3.3)** — before truncation the phantom row reads `gc = 0` on scaffolds and would falsify the
@@ -1936,6 +1944,22 @@ checklist) is what this table is.
 | 7 (L) | Stage 0 bundles too many items in prose | §7.4's stage-0 cell reduced to a pointer; a seven-item checklist **0.a–0.g** added below the table. Item **0.c** (2-D `mapq` truncation along axis 0) is new — it was implied by §2.2.2 but was not on any test list, which is exactly the overlooked-item failure the finding predicted. |
 | 8 (L) | Cumsum cache lifetime unspecified | §3.6 specifies location (temp-dir default, so self-limiting), validity (content-addressed, never stale, no TTL), reclamation (`--rebuild-cache` for the current sha256; no deletion during a run because workers mmap the entries; path and total size printed at end of every run), and atomic `os.replace` writes so a crash leaves no half-file. |
 | cond. 2 | `h5repack` availability | Converted from an open question into an **entry gate on §7.4 stage 2**: run `h5repack --version` and record it; if absent, install `hdf5-tools` or record explicit human acceptance of the ~2× worst case. Stated at §3.2.2, in stage 2's gate cell, and at §12.4, with the reason it must be a human gate rather than a runtime branch (there is no third fallback, and a from-scratch rewrite would resurrect the attr-fidelity problem in-place mutation exists to avoid). |
+
+#### Round 5 (implementation review of `6294a01`, verdict B+)
+
+The first review of *code* rather than of this document. Six of the eight findings are test-suite
+defects; only two touch the design.
+
+| # | Finding | How it was addressed |
+|---|---|---|
+| H-1 | The end-to-end tests had a circular oracle — fixture `gc` was produced by `recompute_gc_for_contig`, the function under test, so a `+1` mutation on its output still passed | A deliberately naive reference encoder (`naive_gc_uint8` in `tests/test_gc_repair.py`) now generates all fixture `gc`: it parses the FASTA text with plain Python I/O, slices the sequence string per fragment, counts `C`/`G` as 1.0 and `N` as 0.5 (per `sequence.pyx:40`), and applies the documented `round(x, 5)` → `rint(x * 254)` quantisation. It shares no code with `repair.py` or with `get_g_or_c_cumsum`. Verified by mutation: `+1` on the GC output fails 8 tests; `round(x, 4)` fails 7, including all three e2e tests the review named. |
+| H-2 | Region classification (§5b) was only exercised for the trivial no-changes case | Eight new `classify_gc_changes` tests over synthetic band inputs, covering both directions: above-T24 zero→value corruption and N-containing middle-band changes are **permitted**; below-T23 changes, N-free middle-band changes, `255→x` and `x→255` are **blocked**. Plus two end-to-end tests that corrupt a fixture's `gc` and assert `repair_local_file` aborts and leaves the file byte-identical. Verified by mutation: disabling the two region guards fails 5 tests. |
+| M-1 | Layer 2's `--expect-fasta-sha256` requirement was documented but never enforced | `parse_args` now errors in `--apply` mode whenever `--fasta` is given without the pin. `--fasta` is the right proxy for "some target has `gc`" because `repair_local_file` already aborts on a `gc`-bearing file with no `--fasta`; both halves are now tested. |
+| M-2 | No fixture carried methyl or `fragment_end_clipped` datasets, so `detect_padding_row`'s generic tail check and `truncate_contig_datasets` ran untested on that path | Fixture support for arbitrary extra 1-D datasets, plus four tests: padding detected with all four methyl arrays present; a **nonzero** methyl tail aborts (proving the extras are actually inspected, not skipped); truncation preserves dtype, compression and values on every extra; and a full `repair_local_file` run over a methyl file. |
+| M-3 | The rounding test survived a `round(x, 4)` mutation because the fixture FASTA was all-G | `chr1` is now a 20 kb varied ACGTN mix and fragment lengths run to 400, so GC fractions are mostly non-terminating decimals. A `test_fixtures_are_rounding_sensitive` guard asserts each e2e fixture contains ≥3 fragments whose encoded byte differs between `round(x, 4)` and `round(x, 5)`, so a future fixture edit cannot silently re-weaken every downstream assertion. |
+| L-1 | `--num-processes` was declared but processing is sequential | **Flag removed**, per §11's "do not build what is not needed". A test asserts it is rejected. |
+| L-2 | The idempotency test's second pass was a dry run, so the write path never ran twice | Second pass is now `dry_run=False` and every dataset is compared byte-for-byte against the first pass's output, with `_repair_history` asserted to have exactly two elements. Verified by a write-path-only mutant that leaves all dry-run reports unchanged: only this test fails. |
+| L-3 | §5 layer 2 said "sha256 of FASTA and its `.fai`"; the code hashes only the FASTA | **Doc corrected to match the code**, with the reason stated: the `.fai` is derived from the FASTA, carries no sequence bytes, and a disagreeing `.fai` is caught by layer 3's geometry checks. No hashing was added — pinning a derived artefact pins nothing new. |
 
 ---
 

@@ -1093,7 +1093,8 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--expect-fasta-sha256",
-        help="Expected SHA-256 of the FASTA file. Required in --apply mode when files have gc.",
+        help="Expected SHA-256 of the FASTA file (§5 layer 2). "
+             "Required in --apply mode whenever --fasta is given.",
     )
     parser.add_argument(
         "--ledger",
@@ -1104,12 +1105,6 @@ def parse_args(argv=None):
         type=int,
         default=1,
         help="Maximum number of files to process (default: 1).",
-    )
-    parser.add_argument(
-        "--num-processes",
-        type=int,
-        default=4,
-        help="Number of parallel worker processes (default: 4).",
     )
     parser.add_argument(
         "--cumsum-cache",
@@ -1152,6 +1147,11 @@ def parse_args(argv=None):
             parser.error("--ledger is required in --apply mode")
         if args.target_list and not args.bucket:
             parser.error("--bucket is required when using --target-list")
+        # §5 layer 2: the reference bytes must be pinned before any write. --fasta
+        # is itself required for any target that has a gc dataset (repair_local_file
+        # aborts otherwise), so gating on --fasta covers every gc-bearing target.
+        if args.fasta and not args.expect_fasta_sha256:
+            parser.error("--expect-fasta-sha256 is required in --apply mode when --fasta is given")
 
     return args
 

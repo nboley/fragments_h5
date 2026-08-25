@@ -29,6 +29,8 @@ import pytest
 
 from fragments_h5.repair import (
     RepairAbort,
+    T23,
+    T24,
     build_n_prefix_sum,
     check_gc_presence,
     classify_gc_changes,
@@ -66,6 +68,88 @@ def _write_fasta(path, contigs):
     pysam.faidx(path)
 
 
+def _random_sequence(seed, length, weights=(0.22, 0.24, 0.24, 0.22, 0.08)):
+    """Deterministic ACGTN sequence with a realistic-ish base mix."""
+    rng = np.random.RandomState(seed)
+    return "".join(rng.choice(list("ACGTN"), size=length, p=list(weights)))
+
+
+# ---------------------------------------------------------------------------
+# Independent GC oracle (§7.4 / review finding H-1)
+#
+# Everything below this banner is deliberately naive and shares NO code with
+# fragments_h5.repair or with fragments_h5.fragment's cumsum machinery. It reads
+# the FASTA text itself, slices the sequence string per fragment, and counts
+# characters. This is the oracle the end-to-end tests assert against; using
+# recompute_gc_for_contig to build fixture GC values would make those tests
+# circular (they would pass against any implementation, including a wrong one).
+# ---------------------------------------------------------------------------
+
+def read_fasta_sequences(path):
+    """Parse a FASTA file into {contig: sequence} with plain Python text I/O."""
+    seqs = {}
+    name = None
+    chunks = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if name is not None:
+                    seqs[name] = "".join(chunks)
+                name = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+    if name is not None:
+        seqs[name] = "".join(chunks)
+    return seqs
+
+
+# Per-base C+G contribution. C and G contribute 1.0; N is encoded as
+# (0.25, 0.25, 0.25, 0.25) at sequence.pyx:40, so its C+G share is 0.5.
+_GC_CONTRIBUTION = {"C": 1.0, "G": 1.0, "N": 0.5}
+
+
+def naive_gc_uint8(sequence, starts, lengths, ndigits=5):
+    """Reference GC encoder: slice the sequence, count characters, quantise.
+
+    Quantisation follows the documented two stages: round(fraction, 5) then
+    round(q5 * 254) to uint8. Zero-length fragments encode as 255.
+
+    ndigits is only ever varied by the rounding-sensitivity check below, which
+    needs to know whether a fixture can tell round(x, 5) from round(x, 4).
+    """
+    out = np.empty(len(starts), dtype=np.uint8)
+    for i in range(len(starts)):
+        length = int(lengths[i])
+        if length == 0:
+            out[i] = 255
+            continue
+        start = int(starts[i])
+        span = sequence[start : start + length].upper()
+        assert len(span) == length, (
+            f"fragment [{start}, {start + length}) runs past the contig"
+        )
+        total = 0.0
+        for ch in span:
+            total += _GC_CONTRIBUTION.get(ch, 0.0)
+        out[i] = int(round(round(total / length, ndigits) * 254))
+    return out
+
+
+def count_rounding_sensitive(sequence, starts, lengths):
+    """How many fragments encode differently under round(x, 4) vs round(x, 5).
+
+    A fixture with zero such fragments cannot detect a bug in the fifth decimal
+    place — that is exactly why the original all-G fixture was weak (M-3).
+    """
+    q5 = naive_gc_uint8(sequence, starts, lengths, ndigits=5)
+    q4 = naive_gc_uint8(sequence, starts, lengths, ndigits=4)
+    return int(np.sum(q5 != q4))
+
+
 def _make_fragment_h5(
     path,
     contigs,
@@ -82,6 +166,7 @@ def _make_fragment_h5(
         'gc': np.array (optional),
         'mapq': np.array (optional, shape (n,2)),
         'strand': np.array (optional),
+        'extra': dict of name -> np.array (optional; methyl / fragment_end_clipped),
     }
     add_padding: if True, append a phantom zero-row to every dataset (simulating the bug).
     contig_lengths: dict of contig_name -> int (for attrs).
@@ -150,6 +235,13 @@ def _make_fragment_h5(
                     strand = np.append(strand, b"")
                 mk(f"data/{contig}/strand", strand, "|S1")
 
+            # Extra 1-D datasets: methyl counts, fragment_end_clipped
+            for extra_name, extra_arr in data.get("extra", {}).items():
+                arr = extra_arr
+                if add_padding:
+                    arr = np.append(arr, np.zeros(1, dtype=arr.dtype))
+                mk(f"data/{contig}/{extra_name}", arr, arr.dtype)
+
             # Build index
             cl = contig_lengths[contig]
             n_with_pad = n + (1 if add_padding else 0)
@@ -177,92 +269,101 @@ def _make_fragment_h5(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+CHR1_LEN = 20000
+CHR2_LEN = 200
+
+
 @pytest.fixture
 def tiny_fasta():
-    """A small FASTA: chr1 (300 bp, all G), chr2 (200 bp, G+N+G)."""
+    """A small FASTA.
+
+    chr1 (20000 bp) is a varied ACGTN mix so that fragment GC fractions span
+    [0, 1] with non-terminating decimals — an all-G contig makes round(x, 5) and
+    round(x, 4) indistinguishable and hides rounding bugs (review finding M-3).
+    chr2 (200 bp) keeps the G+N+G layout the N-prefix-sum test relies on.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "test.fa")
         _write_fasta(path, [
-            ("chr1", "G" * 300),
+            ("chr1", _random_sequence(7, CHR1_LEN)),
             ("chr2", "G" * 80 + "N" * 40 + "G" * 80),
         ])
         yield path
 
 
+def _fragment_geometry(seed_starts, seed_lengths, n, hi_start, len_lo, len_hi, contig_len):
+    """Sorted starts / lengths clipped to the contig."""
+    starts = np.sort(
+        np.random.RandomState(seed_starts).randint(0, hi_start, n)
+    ).astype("int32")
+    lengths = np.random.RandomState(seed_lengths).randint(
+        len_lo, len_hi, n
+    ).astype("uint16")
+    stops = starts.astype(np.int64) + lengths.astype(np.int64)
+    mask = stops <= contig_len
+    return starts[mask], lengths[mask]
+
+
+def _build_fixture_contigs(fasta_path, seeds):
+    """Build (starts, lengths, gc) per contig with GC from the independent oracle."""
+    seqs = read_fasta_sequences(fasta_path)
+
+    starts1, lengths1 = _fragment_geometry(
+        seeds[0], seeds[1], 1500, CHR1_LEN - 400, 10, 300, CHR1_LEN
+    )
+    gc1 = naive_gc_uint8(seqs["chr1"], starts1, lengths1)
+
+    starts2, lengths2 = _fragment_geometry(
+        seeds[2], seeds[3], 180, CHR2_LEN - 40, 5, 30, CHR2_LEN
+    )
+    gc2 = naive_gc_uint8(seqs["chr2"], starts2, lengths2)
+
+    return {
+        "chr1": {"starts": starts1, "lengths": lengths1, "gc": gc1},
+        "chr2": {"starts": starts2, "lengths": lengths2, "gc": gc2},
+    }
+
+
+FIXTURE_CONTIG_LENGTHS = {"chr1": CHR1_LEN, "chr2": CHR2_LEN}
+
+
 @pytest.fixture
 def clean_h5(tiny_fasta):
-    """A correctly-built fragment H5 (no padding, correct GC)."""
+    """A correctly-built fragment H5 (no padding, oracle-derived GC)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Compute correct GC values using the reference
-        from fragments_h5.fragment import get_g_or_c_cumsum
-
-        # chr1: all G, so every fragment has GC = 1.0 -> uint8 = 254
-        n1 = 150
-        starts1 = np.sort(np.random.RandomState(42).randint(0, 250, n1)).astype("int32")
-        lengths1 = np.random.RandomState(43).randint(10, 50, n1).astype("uint16")
-        # Clip to contig length
-        stops1 = starts1.astype(np.int64) + lengths1.astype(np.int64)
-        mask1 = stops1 <= 300
-        starts1 = starts1[mask1]
-        lengths1 = lengths1[mask1]
-
-        cumsum1, _ = get_g_or_c_cumsum(tiny_fasta, "chr1")
-        gc1 = recompute_gc_for_contig(starts1, lengths1, cumsum1)
-
-        # chr2: G+N+G mix
-        n2 = 120
-        starts2 = np.sort(np.random.RandomState(44).randint(0, 160, n2)).astype("int32")
-        lengths2 = np.random.RandomState(45).randint(5, 30, n2).astype("uint16")
-        stops2 = starts2.astype(np.int64) + lengths2.astype(np.int64)
-        mask2 = stops2 <= 200
-        starts2 = starts2[mask2]
-        lengths2 = lengths2[mask2]
-
-        cumsum2, _ = get_g_or_c_cumsum(tiny_fasta, "chr2")
-        gc2 = recompute_gc_for_contig(starts2, lengths2, cumsum2)
-
+        contigs = _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45))
         h5_path = os.path.join(tmpdir, "clean.h5")
-        _make_fragment_h5(h5_path, {
-            "chr1": {"starts": starts1, "lengths": lengths1, "gc": gc1},
-            "chr2": {"starts": starts2, "lengths": lengths2, "gc": gc2},
-        }, contig_lengths={"chr1": 300, "chr2": 200})
+        _make_fragment_h5(h5_path, contigs, contig_lengths=FIXTURE_CONTIG_LENGTHS)
         yield h5_path
+
+
+@pytest.fixture
+def expected_clean_gc(tiny_fasta):
+    """Oracle GC for the clean_h5 fixture, computed independently of repair.py."""
+    return {
+        c: d["gc"] for c, d in _build_fixture_contigs(tiny_fasta, (42, 43, 44, 45)).items()
+    }
 
 
 @pytest.fixture
 def padded_h5(tiny_fasta):
     """Fragment H5 with phantom padding rows (simulating the caddb89 bug)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        from fragments_h5.fragment import get_g_or_c_cumsum
-
-        n1 = 200
-        starts1 = np.sort(np.random.RandomState(50).randint(0, 260, n1)).astype("int32")
-        lengths1 = np.random.RandomState(51).randint(10, 40, n1).astype("uint16")
-        stops1 = starts1.astype(np.int64) + lengths1.astype(np.int64)
-        mask1 = stops1 <= 300
-        starts1 = starts1[mask1]
-        lengths1 = lengths1[mask1]
-
-        cumsum1, _ = get_g_or_c_cumsum(tiny_fasta, "chr1")
-        gc1 = recompute_gc_for_contig(starts1, lengths1, cumsum1)
-
-        n2 = 180
-        starts2 = np.sort(np.random.RandomState(52).randint(0, 170, n2)).astype("int32")
-        lengths2 = np.random.RandomState(53).randint(5, 25, n2).astype("uint16")
-        stops2 = starts2.astype(np.int64) + lengths2.astype(np.int64)
-        mask2 = stops2 <= 200
-        starts2 = starts2[mask2]
-        lengths2 = lengths2[mask2]
-
-        cumsum2, _ = get_g_or_c_cumsum(tiny_fasta, "chr2")
-        gc2 = recompute_gc_for_contig(starts2, lengths2, cumsum2)
-
+        contigs = _build_fixture_contigs(tiny_fasta, (50, 51, 52, 53))
         h5_path = os.path.join(tmpdir, "padded.h5")
-        _make_fragment_h5(h5_path, {
-            "chr1": {"starts": starts1, "lengths": lengths1, "gc": gc1},
-            "chr2": {"starts": starts2, "lengths": lengths2, "gc": gc2},
-        }, add_padding=True, contig_lengths={"chr1": 300, "chr2": 200})
+        _make_fragment_h5(
+            h5_path, contigs, add_padding=True,
+            contig_lengths=FIXTURE_CONTIG_LENGTHS,
+        )
         yield h5_path
+
+
+@pytest.fixture
+def expected_padded_gc(tiny_fasta):
+    """Oracle GC for the padded_h5 fixture's real (non-phantom) fragments."""
+    return {
+        c: d["gc"] for c, d in _build_fixture_contigs(tiny_fasta, (50, 51, 52, 53)).items()
+    }
 
 
 @pytest.fixture
@@ -273,6 +374,78 @@ def cumsum_cache(tiny_fasta):
         from fragments_h5.repair import build_cumsum_cache
         build_cumsum_cache(tiny_fasta, cache_dir, fasta_sha256)
         yield cache_dir, fasta_sha256
+
+
+# ---------------------------------------------------------------------------
+# GC correctness against the independent oracle (review finding H-1)
+# ---------------------------------------------------------------------------
+
+class TestGcAgainstIndependentOracle:
+    """recompute_gc_for_contig must agree with a naive character-counting oracle."""
+
+    def test_matches_oracle_on_varied_sequence(self, tiny_fasta):
+        """Every fragment's GC byte matches the oracle over a varied ACGTN contig."""
+        from fragments_h5.fragment import get_g_or_c_cumsum
+
+        seqs = read_fasta_sequences(tiny_fasta)
+        starts, lengths = _fragment_geometry(
+            110, 111, 3000, CHR1_LEN - 400, 1, 400, CHR1_LEN
+        )
+        cumsum, _ = get_g_or_c_cumsum(tiny_fasta, "chr1")
+
+        actual = recompute_gc_for_contig(starts, lengths, cumsum)
+        expected = naive_gc_uint8(seqs["chr1"], starts, lengths)
+
+        n_diff = int(np.sum(actual != expected))
+        assert n_diff == 0, (
+            f"{n_diff} of {len(starts)} fragments disagree with the oracle; "
+            f"first differing index {int(np.argmax(actual != expected))}"
+        )
+
+    def test_oracle_covers_the_gc_range(self, tiny_fasta):
+        """The oracle fixture spans a wide range of GC bytes (not a degenerate case)."""
+        seqs = read_fasta_sequences(tiny_fasta)
+        starts, lengths = _fragment_geometry(
+            110, 111, 3000, CHR1_LEN - 400, 1, 400, CHR1_LEN
+        )
+        gc = naive_gc_uint8(seqs["chr1"], starts, lengths)
+        assert gc.min() < 40 and gc.max() > 210, (
+            f"GC bytes span only [{gc.min()}, {gc.max()}]"
+        )
+        assert len(np.unique(gc)) > 100
+
+    @pytest.mark.parametrize("seeds", [(42, 43, 44, 45), (50, 51, 52, 53)])
+    def test_fixtures_are_rounding_sensitive(self, tiny_fasta, seeds):
+        """The e2e fixtures must be able to distinguish round(x, 5) from round(x, 4).
+
+        This is a guard on the fixtures themselves, not on repair.py. The
+        end-to-end tests can only catch a quantisation bug if their fragments
+        include some whose encoded byte depends on the fifth decimal place. If a
+        future edit to the geometry or the FASTA destroys that, this fails loudly
+        instead of silently weakening every e2e assertion.
+        """
+        seqs = read_fasta_sequences(tiny_fasta)
+        contigs = _build_fixture_contigs(tiny_fasta, seeds)
+        n_sensitive = count_rounding_sensitive(
+            seqs["chr1"], contigs["chr1"]["starts"], contigs["chr1"]["lengths"]
+        )
+        assert n_sensitive >= 3, (
+            f"fixture {seeds} has only {n_sensitive} rounding-sensitive fragments"
+        )
+
+    def test_oracle_handles_n_bases(self, tiny_fasta):
+        """An all-N span encodes as 0.5 -> 127, matching the recomputation."""
+        from fragments_h5.fragment import get_g_or_c_cumsum
+
+        seqs = read_fasta_sequences(tiny_fasta)
+        # chr2 positions [80, 120) are the N block
+        starts = np.array([80, 90, 80], dtype="int32")
+        lengths = np.array([40, 20, 10], dtype="uint16")
+        expected = naive_gc_uint8(seqs["chr2"], starts, lengths)
+        assert np.all(expected == 127)
+
+        cumsum, _ = get_g_or_c_cumsum(tiny_fasta, "chr2")
+        assert np.array_equal(recompute_gc_for_contig(starts, lengths, cumsum), expected)
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +510,9 @@ class TestDeleteAndRecreatDataset:
 class TestSyntheticPaddingFixture:
     """Build a fixture with one phantom row per contig, run the repair, verify."""
 
-    def test_truncation_full_pipeline(self, padded_h5, tiny_fasta, cumsum_cache):
+    def test_truncation_full_pipeline(
+        self, padded_h5, tiny_fasta, cumsum_cache, expected_padded_gc,
+    ):
         """Full repair on padded fixture: truncation fires, index rebuilt, flc correct."""
         cache_dir, fasta_sha256 = cumsum_cache
 
@@ -379,6 +554,11 @@ class TestSyntheticPaddingFixture:
                     for ds in f[f"data/{contig}"]
                 ]
                 assert len(set(ds_lens)) == 1
+
+                # GC matches the independent oracle, not the code under test
+                assert np.array_equal(
+                    f[f"data/{contig}/gc"][:], expected_padded_gc[contig]
+                ), f"{contig}: repaired gc does not match the independent oracle"
 
             # Index key set unchanged
             new_index_keys = set(f["index"].keys()) if "index" in f else set()
@@ -462,21 +642,34 @@ class TestRoundingAgreement:
         return int(round(gc * 254))
 
     def test_rounding_random_fragments(self, tiny_fasta):
-        """Rounding agreement over a large set of random fragments."""
+        """Rounding agreement over a large set of random fragments.
+
+        chr1 is a varied ACGTN mix (see the tiny_fasta docstring) so the GC
+        fractions here are mostly non-terminating decimals with denominators up
+        to 400. That is what makes the fifth decimal place observable — on an
+        all-G contig every fraction is 1.0 and round(x, 5) == round(x, 4).
+        """
         from fragments_h5.fragment import get_g_or_c_cumsum
 
-        cumsum, _ = get_g_or_c_cumsum(tiny_fasta, "chr1")  # all-G, 300 bp
+        cumsum, _ = get_g_or_c_cumsum(tiny_fasta, "chr1")
 
         # Generate many fragments
         rng = np.random.RandomState(100)
         n = 100_000  # 100k fragments for fast test
-        starts = rng.randint(0, 250, n).astype("int32")
-        lengths = rng.randint(1, 50, n).astype("uint16")
+        starts = rng.randint(0, CHR1_LEN - 400, n).astype("int32")
+        lengths = rng.randint(1, 400, n).astype("uint16")
         # Clip
         stops = starts.astype(np.int64) + lengths.astype(np.int64)
-        mask = stops <= 300
+        mask = stops <= CHR1_LEN
         starts = starts[mask]
         lengths = lengths[mask]
+
+        # Sanity: the fixture actually exercises a wide range of GC fractions
+        fracs = (cumsum[stops[mask]] - cumsum[starts]) / lengths.astype(np.float64)
+        assert fracs.min() < 0.2 and fracs.max() > 0.8, (
+            f"GC fractions too narrow to exercise rounding: "
+            f"[{fracs.min():.3f}, {fracs.max():.3f}]"
+        )
 
         # Vectorized
         gc_vec = recompute_gc_for_contig(starts, lengths, cumsum)
@@ -661,6 +854,124 @@ class TestDetectPaddingRow:
 
 
 # ---------------------------------------------------------------------------
+# methyl / fragment_end_clipped datasets (review finding M-2)
+# ---------------------------------------------------------------------------
+
+METHYL_KEYS = ("num_cpgs", "num_converted_cpgs", "num_cytosines", "num_converted_cytosines")
+
+
+def _methyl_extras(n, seed):
+    """Realistic methyl + fragment_end_clipped arrays for n fragments."""
+    rng = np.random.RandomState(seed)
+    extras = {k: rng.randint(1, 30, n).astype("uint16") for k in METHYL_KEYS}
+    # fragment_end_clipped is 0/1/255; keep it nonzero so a zero tail is a signal
+    extras["fragment_end_clipped"] = rng.choice([1, 255], size=n).astype("uint8")
+    return extras
+
+
+def _make_methyl_h5(path, n=250, add_padding=True, contig_length=100000, seed=90):
+    starts = np.sort(np.random.RandomState(seed).randint(0, 90000, n)).astype("int32")
+    lengths = np.random.RandomState(seed + 1).randint(10, 50, n).astype("uint16")
+    _make_fragment_h5(path, {
+        "chr1": {
+            "starts": starts,
+            "lengths": lengths,
+            "extra": _methyl_extras(n, seed + 2),
+        },
+    }, read_gc=False, add_padding=add_padding, contig_lengths={"chr1": contig_length})
+    return starts, lengths
+
+
+class TestMethylDatasets:
+    """detect_padding_row and truncate_contig_datasets on methyl-bearing files."""
+
+    def test_padding_detected_with_methyl_datasets(self):
+        """A phantom row is still detected when methyl arrays are present."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "methyl.h5")
+            _make_methyl_h5(h5_path)
+
+            with h5py.File(h5_path, "r") as f:
+                present = set(f["data/chr1"].keys())
+                assert set(METHYL_KEYS) | {"fragment_end_clipped"} <= present
+                assert detect_padding_row(f, "chr1") == "truncate"
+
+    def test_nonzero_methyl_tail_aborts(self):
+        """The zero signature covers methyl arrays: a nonzero tail must abort.
+
+        This is what proves detect_padding_row actually inspects the extra
+        datasets rather than ignoring them.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "methyl_bad.h5")
+            _make_methyl_h5(h5_path)
+
+            # Sortedness violation still holds, but one methyl tail is nonzero
+            with h5py.File(h5_path, "r+") as f:
+                arr = f["data/chr1/num_cpgs"][:]
+                arr[-1] = 7
+                del f["data/chr1/num_cpgs"]
+                f.create_dataset("data/chr1/num_cpgs", data=arr, dtype="uint16")
+
+            with h5py.File(h5_path, "r") as f:
+                with pytest.raises(RepairAbort, match="exactly one"):
+                    detect_padding_row(f, "chr1")
+
+    def test_truncation_covers_methyl_datasets(self):
+        """Every methyl array is truncated, with dtype, params and values intact."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "methyl.h5")
+            n = 250
+            _make_methyl_h5(h5_path, n=n)
+
+            with h5py.File(h5_path, "r") as f:
+                before = {k: f[f"data/chr1/{k}"][:] for k in f["data/chr1"]}
+                assert all(len(v) == n + 1 for v in before.values())
+
+            with h5py.File(h5_path, "r+") as f:
+                truncate_contig_datasets(f, "chr1")
+
+            with h5py.File(h5_path, "r") as f:
+                grp = f["data/chr1"]
+                assert set(grp.keys()) == set(before.keys())
+                for key in METHYL_KEYS + ("fragment_end_clipped",):
+                    ds = grp[key]
+                    assert ds.shape == (n,), f"{key}: {ds.shape}"
+                    assert ds.dtype == before[key].dtype
+                    assert ds.compression == "gzip"
+                    assert ds.compression_opts == 4
+                    assert np.array_equal(ds[:], before[key][:-1])
+
+    def test_repair_end_to_end_with_methyl(self):
+        """Full repair on a methyl file: truncation applies to every dataset."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "methyl.h5")
+            n = 250
+            _make_methyl_h5(h5_path, n=n)
+
+            with h5py.File(h5_path, "r") as f:
+                before = {k: f[f"data/chr1/{k}"][:] for k in f["data/chr1"]}
+
+            report = repair_local_file(
+                local_path=h5_path,
+                fasta_path=None,
+                cumsum_cache_dir=None,
+                fasta_sha256=None,
+                dry_run=False,
+            )
+            assert report["status"] == "ok_no_gc"
+            assert report["contigs_truncated"] == 1
+
+            with h5py.File(h5_path, "r") as f:
+                grp = f["data/chr1"]
+                for key in before:
+                    assert grp[key].shape[0] == n, f"{key} not truncated"
+                    assert np.array_equal(grp[key][:], before[key][:-1]), f"{key} corrupted"
+                # Index rebuilt against the truncated starts
+                assert f["index/chr1"][-1] == n
+
+
+# ---------------------------------------------------------------------------
 # no-gc file handling (§3.2.5)
 # ---------------------------------------------------------------------------
 
@@ -752,7 +1063,9 @@ class TestCleanFileIdempotency:
                 f"{contig}: {stats.get('changed_total')} gc changes on clean file"
             )
 
-    def test_apply_preserves_gc(self, clean_h5, tiny_fasta, cumsum_cache):
+    def test_apply_preserves_gc(
+        self, clean_h5, tiny_fasta, cumsum_cache, expected_clean_gc,
+    ):
         """Apply on clean file: gc unchanged, repair_history added."""
         import shutil
         cache_dir, fasta_sha256 = cumsum_cache
@@ -781,6 +1094,10 @@ class TestCleanFileIdempotency:
                 for c in f["data"]:
                     assert np.array_equal(f[f"data/{c}/gc"][:], old_gc[c]), (
                         f"{c}: gc changed on clean file"
+                    )
+                    # ... and that unchanged value is the independently-derived one
+                    assert np.array_equal(f[f"data/{c}/gc"][:], expected_clean_gc[c]), (
+                        f"{c}: gc does not match the independent oracle"
                     )
                 # repair_history added
                 assert "_repair_history" in f.attrs
@@ -813,6 +1130,45 @@ class TestNPrefixSum:
 # Region classification
 # ---------------------------------------------------------------------------
 
+FRAG_LEN = 10
+
+
+def _region_inputs(regions, n_flags=None):
+    """Build (starts, lengths, f32_cumsum, n_prefix) placing each fragment in a region.
+
+    regions: sequence of 'below' | 'middle' | 'above' — the float32 cumsum band
+        that fragment i's stop coordinate lands in.
+    n_flags: optional sequence of bool — whether fragment i's span contains an N.
+
+    f32_cumsum and n_prefix are constructed directly rather than derived from a
+    real contig: reaching T24 for real needs a 16.7 Mb sequence, and the thing
+    under test is the classification rule, not the cumsum.
+    """
+    n = len(regions)
+    starts = (np.arange(n) * FRAG_LEN).astype(np.int32)
+    lengths = np.full(n, FRAG_LEN, dtype=np.uint16)
+    size = n * FRAG_LEN + 1
+
+    band_value = {
+        "below": np.float32(T23 - 1000.0),
+        "middle": np.float32(T23 + 1000.0),
+        "above": np.float32(T24 + 1000.0),
+    }
+    f32_cumsum = np.zeros(size, dtype=np.float32)
+    for i, region in enumerate(regions):
+        f32_cumsum[(i + 1) * FRAG_LEN] = band_value[region]
+
+    is_n = np.zeros(size - 1, dtype=bool)
+    if n_flags is not None:
+        for i, flag in enumerate(n_flags):
+            if flag:
+                is_n[i * FRAG_LEN] = True
+    n_prefix = np.zeros(size, dtype=np.int64)
+    n_prefix[1:] = np.cumsum(is_n)
+
+    return starts, lengths, f32_cumsum, n_prefix
+
+
 class TestRegionClassification:
     """Test classify_gc_changes with known region assignments."""
 
@@ -831,6 +1187,173 @@ class TestRegionClassification:
         stats, violations = classify_gc_changes(gc, gc, starts, lengths, f32_cumsum, n_prefix)
         assert len(violations) == 0
         assert stats["changed_total"] == 0
+
+    # -- permissive direction: genuine corruption patterns must be allowed ---
+
+    def test_saturation_corruption_above_t24_permitted(self):
+        """The real corruption signature — gc 0 above T24 — classifies clean.
+
+        Past T24 the float32 accumulator stops advancing, so every numerator is
+        0 and the stored byte is 0. Recomputation replaces those with real
+        values; that is the whole point of the tool and must not be blocked.
+        """
+        n = 60
+        regions = ["above"] * n
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(regions)
+
+        old_gc = np.zeros(n, dtype=np.uint8)
+        new_gc = np.arange(1, n + 1, dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert violations == []
+        assert stats["above_T24"] == n
+        assert stats["changed_above_T24"] == n
+        assert stats["zero_to_nonzero"] == n
+
+    def test_middle_band_change_on_n_span_permitted(self):
+        """Between T23 and T24 only N-containing spans may change — and they may."""
+        regions = ["middle"] * 4
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(
+            regions, n_flags=[True, True, True, True]
+        )
+
+        old_gc = np.array([100, 100, 100, 100], dtype=np.uint8)
+        new_gc = np.array([101, 99, 100, 102], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert violations == []
+        assert stats["changed_between_T23_T24"] == 3
+        assert stats["changed_between_T23_T24_no_N"] == 0
+
+    def test_mixed_regions_only_flags_the_bad_ones(self):
+        """A file with all three bands: only the below-T23 change is a violation."""
+        regions = ["below", "middle", "above"]
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(
+            regions, n_flags=[False, True, False]
+        )
+        old_gc = np.array([50, 50, 0], dtype=np.uint8)
+        new_gc = np.array([51, 52, 200], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert stats["changed_below_T23"] == 1
+        assert stats["changed_between_T23_T24"] == 1
+        assert stats["changed_between_T23_T24_no_N"] == 0
+        assert stats["changed_above_T24"] == 1
+        assert len(violations) == 1
+        assert "pre-saturation" in violations[0]
+
+    # -- blocking direction: impossible patterns must be rejected -----------
+
+    def test_below_t23_change_blocked(self):
+        """A gc change in the pre-saturation band is impossible — must violate."""
+        n = 20
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(["below"] * n)
+        old_gc = np.zeros(n, dtype=np.uint8)
+        new_gc = np.full(n, 200, dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert stats["changed_below_T23"] == n
+        assert any("pre-saturation" in v for v in violations), violations
+
+    def test_middle_band_change_without_n_blocked(self):
+        """Between T23 and T24, an N-free span cannot legitimately change."""
+        regions = ["middle"] * 5
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(
+            regions, n_flags=[False, False, True, False, False]
+        )
+        old_gc = np.full(5, 100, dtype=np.uint8)
+        new_gc = np.array([101, 101, 101, 101, 100], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        # 4 changed; 3 of them on N-free spans
+        assert stats["changed_between_T23_T24"] == 4
+        assert stats["changed_between_T23_T24_no_N"] == 3
+        assert any("N-free" in v for v in violations), violations
+
+    def test_255_to_value_blocked(self):
+        """255 means 'no reference'; turning it into a number implies a wrong FASTA."""
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(["above"] * 3)
+        old_gc = np.array([255, 255, 10], dtype=np.uint8)
+        new_gc = np.array([120, 130, 20], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert stats["x255_to_other"] == 2
+        assert any("255→x" in v for v in violations), violations
+
+    def test_value_to_255_blocked(self):
+        """Turning a real GC value into 255 implies the contig went missing."""
+        starts, lengths, f32_cumsum, n_prefix = _region_inputs(["above"] * 3)
+        old_gc = np.array([10, 20, 30], dtype=np.uint8)
+        new_gc = np.array([255, 20, 30], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert stats["other_to_x255"] == 1
+        assert any("x→255" in v for v in violations), violations
+
+
+class TestCorruptedFileAborts:
+    """End-to-end: a file whose gc disagrees below T23 must fail closed."""
+
+    def test_corrupted_gc_aborts_repair(self, clean_h5, tiny_fasta, cumsum_cache):
+        """Simulated saturation damage on a small contig is impossible — abort.
+
+        Every fragment in the fixture sits far below T23, so no gc byte there can
+        legitimately differ from the recomputation. Zeroing a handful (exactly
+        what float32 saturation does to real files) must therefore be rejected
+        rather than silently "repaired".
+        """
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        with h5py.File(clean_h5, "r+") as f:
+            gc = f["data/chr1/gc"][:]
+            assert np.any(gc != 0)
+            gc[-25:] = 0  # the saturation signature: numerator collapses to zero
+            del f["data/chr1/gc"]
+            f.create_dataset("data/chr1/gc", data=gc, dtype="uint8")
+
+        with pytest.raises(RepairAbort, match="pre-saturation"):
+            repair_local_file(
+                local_path=clean_h5,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=True,
+            )
+
+    def test_corrupted_gc_leaves_file_untouched(self, clean_h5, tiny_fasta, cumsum_cache):
+        """The abort happens before any write, even in --apply mode."""
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        with h5py.File(clean_h5, "r+") as f:
+            gc = f["data/chr2/gc"][:]
+            gc[:10] = 0
+            del f["data/chr2/gc"]
+            f.create_dataset("data/chr2/gc", data=gc, dtype="uint8")
+
+        sha_before = compute_file_sha256(clean_h5)
+        with pytest.raises(RepairAbort):
+            repair_local_file(
+                local_path=clean_h5,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=False,
+            )
+        assert compute_file_sha256(clean_h5) == sha_before
 
 
 # ---------------------------------------------------------------------------
@@ -906,8 +1429,25 @@ class TestIndexRebuild:
 class TestRepairIdempotency:
     """Repairing an already-repaired file is safe."""
 
+    @staticmethod
+    def _snapshot_datasets(path):
+        """Every dataset in the file, by full path, as raw arrays."""
+        snapshot = {}
+
+        def visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                snapshot[name] = obj[:]
+
+        with h5py.File(path, "r") as f:
+            f.visititems(visit)
+        return snapshot
+
     def test_idempotent_datasets(self, padded_h5, tiny_fasta, cumsum_cache):
-        """Second repair changes no datasets (only adds a second history entry)."""
+        """A second --apply run leaves every dataset byte-identical.
+
+        Idempotency replaced the crash-resume protocol in the design, so the
+        second pass must exercise the write path, not dry-run.
+        """
         cache_dir, fasta_sha256 = cumsum_cache
 
         # First repair
@@ -920,30 +1460,37 @@ class TestRepairIdempotency:
         )
         assert report1["contigs_truncated"] > 0
 
-        # Record post-first-repair state
-        with h5py.File(padded_h5, "r") as f:
-            gc_after_first = {
-                c: f[f"data/{c}/gc"][:] for c in f["data"]
-            }
-            n_frags_after_first = {
-                c: len(f[f"data/{c}/starts"]) for c in f["data"]
-            }
+        after_first = self._snapshot_datasets(padded_h5)
+        assert after_first, "no datasets found in the repaired file"
 
-        # Second repair (dry-run to verify no changes)
+        # Second repair — a real write pass, not a dry run
         report2 = repair_local_file(
             local_path=padded_h5,
             fasta_path=tiny_fasta,
             cumsum_cache_dir=cache_dir,
             fasta_sha256=fasta_sha256,
-            dry_run=True,
+            dry_run=False,
         )
 
+        assert report2["status"] == "ok"
         assert report2["contigs_truncated"] == 0
         for contig, res in report2.get("gc_results", {}).items():
             stats = res.get("stats", {})
             assert stats.get("changed_total", 0) == 0, (
                 f"{contig}: gc changed on second repair"
             )
+
+        after_second = self._snapshot_datasets(padded_h5)
+        assert set(after_second) == set(after_first)
+        for name in after_first:
+            assert np.array_equal(after_second[name], after_first[name]), (
+                f"{name} changed on the second --apply run"
+            )
+
+        # Only the provenance attr grows — one history element per apply run
+        with h5py.File(padded_h5, "r") as f:
+            history = json.loads(f.attrs["_repair_history"])
+        assert len(history) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -972,3 +1519,54 @@ class TestCLIParsing:
         from fragments_h5.repair import parse_args
         args = parse_args(["--local-file", "/tmp/test.h5"])
         assert args.max_files == 1
+
+    # -- §5 layer 2: the reference pin (review finding M-1) -----------------
+
+    def test_apply_requires_expect_fasta_sha256(self):
+        """--apply with --fasta and no pin is rejected before anything runs."""
+        from fragments_h5.repair import parse_args
+        with pytest.raises(SystemExit):
+            parse_args([
+                "--apply", "--local-file", "/tmp/test.h5", "--fasta", "/tmp/ref.fa",
+            ])
+
+    def test_apply_accepts_expect_fasta_sha256(self):
+        """--apply with the pin present parses fine."""
+        from fragments_h5.repair import parse_args
+        args = parse_args([
+            "--apply", "--local-file", "/tmp/test.h5", "--fasta", "/tmp/ref.fa",
+            "--expect-fasta-sha256", "0" * 64,
+        ])
+        assert args.dry_run is False
+        assert args.expect_fasta_sha256 == "0" * 64
+
+    def test_dry_run_does_not_require_the_pin(self):
+        """The pin is only mandatory when writing."""
+        from fragments_h5.repair import parse_args
+        args = parse_args(["--local-file", "/tmp/test.h5", "--fasta", "/tmp/ref.fa"])
+        assert args.expect_fasta_sha256 is None
+
+    def test_apply_without_fasta_does_not_require_the_pin(self):
+        """No --fasta means no reference to pin (§3.2.5 no-gc files).
+
+        Targets that do have gc are still covered: repair_local_file aborts when
+        gc is present and --fasta is absent (see test_gc_file_without_fasta_aborts).
+        """
+        from fragments_h5.repair import parse_args
+        args = parse_args(["--apply", "--local-file", "/tmp/test.h5"])
+        assert args.dry_run is False
+
+    def test_num_processes_flag_removed(self):
+        """--num-processes did nothing and is gone (review finding L-1)."""
+        from fragments_h5.repair import parse_args
+        with pytest.raises(SystemExit):
+            parse_args(["--local-file", "/tmp/test.h5", "--num-processes", "4"])
+
+
+class TestFastaRequiredForGcFiles:
+    """The other half of the §5 layer-2 gate: gc without a reference is fatal."""
+
+    def test_gc_file_without_fasta_aborts(self, clean_h5):
+        """A file with a gc dataset cannot be repaired without --fasta."""
+        with pytest.raises(RepairAbort, match="--fasta not provided"):
+            repair_local_file(local_path=clean_h5, fasta_path=None, dry_run=True)
