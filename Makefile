@@ -92,8 +92,24 @@ conda: conda-build
 	@echo "Conda package built successfully!"
 
 docker-build:
+	@# Gate: refuse to build from a dirty tree. Tracked changes (staged or
+	@# unstaged) and untracked files both disqualify. This is the docker-build
+	@# counterpart of the tag target's pyproject.toml check, and directly
+	@# addresses the v2.10.1 image/tag mismatch.
+	@if ! git diff --quiet HEAD; then \
+		echo "Error: working tree has uncommitted changes; refusing to build Docker image."; \
+		echo "  Commit or stash your changes first."; \
+		exit 1; \
+	fi
+	@if [ -n "$$(git ls-files --others --exclude-standard)" ]; then \
+		echo "Error: working tree has untracked files; refusing to build Docker image."; \
+		echo "  Add them to .gitignore or remove them first."; \
+		exit 1; \
+	fi
 	@echo "Building Docker image $(IMAGE_NAME):$(VERSION)..."
-	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+	docker build \
+		--build-arg BUILD_CODE_REVISION="$$(git describe --tags --always --dirty)" \
+		-t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
 	@echo "Docker image built: $(IMAGE_NAME):$(VERSION)"
 
 docker-push: docker-build

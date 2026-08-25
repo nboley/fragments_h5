@@ -634,6 +634,20 @@ unknown; there is no second thing to disambiguate.
 **No new worker-tuple element** — provenance is written in the main process at
 file creation.
 
+### Code revision is library-side, unlike argv
+
+`_build_code_revision` is determined in `fragments_h5.py` via
+`_resolve_build_code_revision()`, not at the CLI boundary. This is a deliberate
+departure from `_build_argv`, which is passed in from `main.py`. The reasoning:
+argv is a property of the *invocation*, known only to the CLI entry point, while
+code revision is a property of the *installed package*, derivable from
+`__file__`. Placing it in the library means the ~30 library and test callers of
+`build_fragments_h5()` also get a revision stamp, rather than only CLI builds.
+
+The resolver returns a self-labeling string with one of four prefixes (`git:`,
+`baked:`, `dist:`, `dist-editable:`) or `None`. The prefix names both the value
+and the oracle that produced it, so consumers know what guarantee applies.
+
 ### Worker-args tuple: nothing is added
 
 Explicit answer to the standing question. The 17-element positional tuple

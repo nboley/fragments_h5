@@ -141,6 +141,7 @@ import importlib.metadata
 import json
 import os
 import re
+import subprocess
 import tempfile
 import multiprocessing
 import signal
@@ -190,6 +191,76 @@ def _resolve_input_path(path):
     if path is None or _is_remote_url(path):
         return path
     return os.path.abspath(path)
+
+
+def _resolve_build_code_revision():
+    """Determine a self-labeling build code revision string.
+
+    Resolution order:
+    1. git describe (if running from a git-tracked file) -> "git:..."
+    2. Baked revision from _build_revision.py (container builds) -> "baked:..."
+    3. Non-editable install dist-info -> "dist:..."
+    4. Editable install dist-info -> "dist-editable:..."
+    5. All fail -> None
+    """
+    pkg_dir = os.path.dirname(__file__)
+
+    # Step 1: Try git — needs its own try/except so a missing git binary
+    # doesn't unwind past steps 2-4.
+    try:
+        # Gate: the running file must be tracked in whatever repo git finds.
+        gate = subprocess.run(
+            ["git", "-C", pkg_dir, "ls-files", "--error-unmatch",
+             os.path.basename(__file__)],
+            capture_output=True, timeout=5, text=True,
+        )
+        if gate.returncode == 0:
+            describe = subprocess.run(
+                ["git", "-C", pkg_dir, "describe", "--tags", "--always", "--dirty"],
+                capture_output=True, timeout=5, text=True,
+            )
+            if describe.returncode == 0 and describe.stdout.strip():
+                revision = describe.stdout.strip()
+                # Check for untracked files anywhere in the repo.
+                untracked = subprocess.run(
+                    ["git", "-C", pkg_dir, "ls-files", "--others",
+                     "--exclude-standard", ":/"],
+                    capture_output=True, timeout=5, text=True,
+                )
+                if untracked.returncode == 0 and untracked.stdout.strip():
+                    revision += "-untracked"
+                return "git:" + revision
+    except Exception:
+        pass
+
+    # Step 2: Baked revision (written at docker image build time).
+    try:
+        from ._build_revision import REVISION
+        if REVISION:
+            return "baked:" + REVISION
+    except ImportError:
+        pass
+
+    # Step 3 / Step 4: dist-info fallback.
+    try:
+        dist_version = importlib.metadata.version("fragments-h5")
+        # Determine if this is an editable install via PEP 610 direct_url.json.
+        editable = False
+        try:
+            dist = importlib.metadata.distribution("fragments-h5")
+            raw = dist.read_text("direct_url.json")
+            if raw is not None:
+                editable = json.loads(raw).get("dir_info", {}).get("editable", False)
+        except Exception:
+            pass
+        if editable:
+            return "dist-editable:" + dist_version
+        return "dist:" + dist_version
+    except Exception:
+        pass
+
+    # Step 5: All fail.
+    return None
 
 
 class FragmentsH5:
@@ -311,6 +382,7 @@ class FragmentsH5:
         _argv = self._f.attrs.get("_build_argv")
         self.build_argv = json.loads(_argv) if _argv is not None else None
         self.build_version = self._f.attrs.get("_build_version")
+        self.build_code_revision = self._f.attrs.get("_build_code_revision")
         if "fragment_length_counts" in self._f:
             self.fragment_length_counts = self._f["fragment_length_counts"][:]
 
@@ -1239,6 +1311,9 @@ def build_fragments_h5(
                 f.attrs["_build_version"] = importlib.metadata.version("fragments-h5")
             except importlib.metadata.PackageNotFoundError:
                 pass
+            _code_rev = _resolve_build_code_revision()
+            if _code_rev is not None:
+                f.attrs["_build_code_revision"] = _code_rev
 
             # Group chunk results by contig, sorted by chunk_start
             chunks_by_contig = defaultdict(list)
