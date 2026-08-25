@@ -632,10 +632,32 @@ property, so it is the one that must be pinned.
 - `gc_u8 = numpy.rint(q5 * 254).astype(numpy.uint8)`.
 
 **Required test, blocking:** elementwise equality between the chosen path and a plain Python-loop
-reference implementing `int(round(round(float(num)/float(den), 5) * 254))`, over **>= 10^7 real
-fragments** drawn from an actual fragment H5, *plus* a synthetic set engineered so that `q5 * 254`
-lands within 1 ulp of `k + 0.5` for many `k`. "Spot-checked on a few thousand" is not acceptable —
-this is the last bit of every stored byte.
+reference implementing `int(round(round(float(num)/float(den), 5) * 254))`. "Spot-checked on a few
+thousand" is not acceptable — this is the last bit of every stored byte. Three arms, all blocking:
+
+1. **Exhaustive over the quantiser's domain.** Every `(num, den)` pair with `den <= 400` and
+   `num ∈ {0, 0.5, 1.0, ... den}` — 160,800 classes, 100% coverage of that band.
+2. **Random fragments from a real contig** (10^5), which is the only arm that exercises the actual
+   `cumsum[stop] - cumsum[start]` indexing against a `get_g_or_c_cumsum` output rather than a
+   synthetic cumsum.
+3. **The engineered half-ulp set**, where `q5 * 254` lands within 1 ulp of `k + 0.5` for many `k`.
+
+*Revision (round 6).* Arm 1 replaces this section's original requirement of **">= 10^7 real
+fragments"**. The reason is that the requirement does not measure what it appears to measure. The
+quantiser's output is a pure function of `(num, den)`: `num` is a half-integer, and on any real
+contig it stays under ~1e8, far inside the range where float64 represents half-integers exactly, so
+the subtraction at §4.2 is exact and two fragments sharing a `(num, den)` always produce the same
+byte. Random fragments therefore *resample a bounded set of equivalence classes* rather than adding
+new cases. Measured on the 20 kb test contig with `den < 400`: 10^5 draws reach **22,894** distinct
+classes, 10^6 draws reach **32,412** — ten times the runtime for 1.4x the coverage — against a
+`den <= 400` domain of 160,800. Extrapolated, 10^7 would cost ~42 s to cover perhaps a quarter of
+the domain. Enumerating all 160,800 classes costs **0.70 s** and covers all of it, so arm 1 strictly
+dominates any number of random draws over the same band. Arm 2 is kept at 10^5 because its job is
+the indexing path, not quantiser coverage.
+
+The honest limit of arm 1: `lengths` is `uint16`, so the full domain runs to `den = 65535` and is not
+enumerable. `den <= 400` covers the cfDNA range the 218 files contain; longer fragments are covered
+only by arms 2 and 3, and by the §7.4 stage-3 dry-run gate over all 218.
 
 **Zero-length fragments (`length == 0`).** Stage A emits `None` when `g_or_c_cumsum is None` **or**
 `frag_stop == frag_start` (`fragment.py:492-493`, `:603-604`, `:736-737`), and Stage B maps
@@ -1332,10 +1354,16 @@ overlooked (review finding 7). They are seven independent items; tick each:
 - [ ] **0.c — 2-D `mapq` truncation.** Assert truncation is along axis 0 only and the shape becomes
       `(n-1, 2)`, not `(n-1,)` (§2.2.2). Cheap, and the one shape mistake that would corrupt real
       data silently.
-- [ ] **0.d — rounding-agreement test** (§3.4) over **>= 10^7** real fragments plus the engineered
-      half-ulp set. Blocking; this is the last bit of every stored byte.
+- [ ] **0.d — rounding-agreement test** (§3.4), three arms: **exhaustive** over all 160,800
+      `(num, den)` classes with `den <= 400`, 10^5 random fragments from a real contig for the
+      indexing path, and the engineered half-ulp set. Blocking; this is the last bit of every stored
+      byte. (Round 6 replaced the original ">= 10^7 fragments" — see §3.4 for the measurements.)
 - [ ] **0.e — float32-accumulator-simulation test** (§5b) asserting the simulated band boundary
       lands exactly where the pre-fix code saturates.
+- [ ] **0.h — T23/T24 end-to-end integration test** (§5b), added in round 6. A real ~17.2 Mb contig
+      whose accumulator crosses both thresholds, run through the production chain with no
+      hand-constructed array in it. Marked `slow` (~3 s, ~730 MB RSS). See the round-6 table for why
+      the component tests could not substitute for it.
 - [ ] **0.f — regenerate the lost REF-P12 sequence histogram** (§4.2) and **commit it**, so §4.2's
       measured alphabet stops being a number this document asserts without a reproducible artifact.
 - [ ] **0.g — the existing overflow regression test still passes**: `tests/test_gc_cumsum_overflow.py`
@@ -1960,6 +1988,44 @@ defects; only two touch the design.
 | L-1 | `--num-processes` was declared but processing is sequential | **Flag removed**, per §11's "do not build what is not needed". A test asserts it is rejected. |
 | L-2 | The idempotency test's second pass was a dry run, so the write path never ran twice | Second pass is now `dry_run=False` and every dataset is compared byte-for-byte against the first pass's output, with `_repair_history` asserted to have exactly two elements. Verified by a write-path-only mutant that leaves all dry-run reports unchanged: only this test fails. |
 | L-3 | §5 layer 2 said "sha256 of FASTA and its `.fai`"; the code hashes only the FASTA | **Doc corrected to match the code**, with the reason stated: the `.fai` is derived from the FASTA, carries no sequence bytes, and a disagreeing `.fai` is caught by layer 3's geometry checks. No hashing was added — pinning a derived artefact pins nothing new. |
+
+#### Round 6 (residual from round 5, plus a spec/implementation divergence)
+
+| # | Finding | How it was addressed |
+|---|---|---|
+| H-2 residual | Round 5 closed H-2 with eight `classify_gc_changes` tests, but every one of them hand-builds `f32_cumsum` and `n_prefix`. `simulate_float32_cumsum` and `build_n_prefix_sum` have their own unit tests, but **nothing joined the three above T23** — the band all 218 damaged files actually live in. Round 5 judged a real ≥16.7 Mb test "a poor trade"; that judgement is reversed. It is the same shape of defect as H-1 (components verified, seam untested, in the region the production data occupies), and `tests/test_gc_cumsum_overflow.py` already spends ~676 MB to demonstrate the bug *exists*, so declining ~730 MB to demonstrate the fix works was inconsistent. | New `TestSaturatingContigEndToEnd` (checklist item **0.h**), marked `slow`. A synthetic ~17.2 Mb contig whose accumulated G/C crosses both `2**23` and `2**24`, with fragments in seven blocks covering every branch of the §5b rule: below T23 with and without `N` (must not change), inside `[T23, T24)` with and without `N` (only `N`-bearing spans may change), and past T24 (every stored byte collapsed to 0 — the production signature). A 400 kb `N` run inside the middle band stalls the float32 accumulator entirely — adding 0.5 to an even float32 integer is a tie that rounds back to itself — opening a ~200k-wide window where float32 and float64 disagree about which band a fragment is in; a `boundary` block sits in that window so the fixture can distinguish the two accumulators. The chain under test is `get_g_or_c_cumsum` → `simulate_float32_cumsum` → `build_n_prefix_sum` → `classify_gc_changes` → `recompute_gc_for_contig` with **no hand-constructed array in it**; expectations come from a float32 accumulator and a character-counting oracle written independently in the test file. Cost: ~2.6 s, 731 MB peak RSS, 17.5 MB FASTA, 137 MB cumsum cache, all in a temp dir. **Verified by mutation** — see the note below. |
+| D-1 | §3.4 specified **>= 10^7** fragments for the rounding-agreement test; `test_rounding_random_fragments` used **10^5**. A silent 100x divergence. | **Design amended, test strengthened.** The 10^7 figure does not measure what it appears to: the quantiser is a pure function of `(num, den)`, so random fragments resample a bounded set of equivalence classes. Measured: 10^5 draws reach 22,894 distinct classes, 10^6 reach 32,412 (10x runtime, 1.4x coverage), against a `den <= 400` domain of 160,800. §3.4 now requires three arms — **exhaustive** over all 160,800 classes (0.70 s, 100% coverage, strictly dominating any number of random draws), 10^5 random real-contig fragments for the indexing path, and the engineered half-ulp set — and states the honest limit, that `den` runs to 65535 and is not enumerable. |
+
+**Mutation evidence for the H-2 residual fix.** Three mutants, each run against the whole of
+`tests/test_gc_repair.py` (54 tests). Counts are measured, not predicted:
+
+| Mutant | New e2e (3) | `TestRegionClassification` (8) | Component unit tests | Whole file |
+|---|---|---|---|---|
+| `n_prefix = build_n_prefix_sum(f32_cumsum)` in `repair_local_file` — a pure wiring slip, passing the simulated array where the exact one belongs | **2 FAIL** | 8 pass | all pass | **2 failed, 52 passed** |
+| `build_n_prefix_sum` returns zeros | **2 FAIL** | 8 pass | `TestNPrefixSum::test_n_positions_detected` fails | 3 failed, 51 passed |
+| `simulate_float32_cumsum` returns the float64 cumsum unchanged | **1 FAIL** | 8 pass | `TestFloat32AccumulatorSimulation::test_saturation_point` fails; `test_simulation_matches_direct` **passes** — its 2 kb sequence never reaches saturation | 2 failed, 52 passed |
+
+Mutant 1 is the one that carries the argument: **it is invisible to every other test in the file.**
+All eight region tests pass because each supplies its own `n_prefix`; both `build_n_prefix_sum` unit
+tests pass because the function itself is unchanged. Only a test that lets the production code wire
+the pieces together can see it. In the middle band the float32 array has already rounded every `N`'s
+0.5 contribution away, so `N` detection returns "no `N`" for every span and the tool aborts on a file
+it should have repaired:
+
+```
+E   fragments_h5.repair.RepairAbort: Contig chrT: GC validation violations:
+    ['221 middle-band changes on N-free spans — abort']
+```
+
+Mutants 2 and 3 are the two the round-5 note itself proposed. Both are caught by the new test, but
+both are *also* caught by an existing component test, so they are weaker evidence than mutant 1. The
+`boundary` block is what makes mutant 3 visible end to end at all — without the drift window the
+float64 accumulator assigns every fragment to the same band the float32 one does, and the mutant
+would slip through the integration test as well:
+
+```
+E   AssertionError: between_T23_T24: chain says 500, independent float32 accumulator says 750
+```
 
 ---
 

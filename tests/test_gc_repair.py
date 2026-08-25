@@ -4,10 +4,13 @@ Covers:
   0.a — delete-and-recreate dataset test
   0.b — synthetic padding-row fixture with full check list
   0.c — 2-D mapq truncation along axis 0 only
-  0.d — rounding-agreement test over >= 10^7 fragments
+  0.d — rounding agreement: exhaustive over the quantiser domain, plus random
+        real-contig fragments, plus the engineered half-ulp set
   0.e — float32-accumulator-simulation test
   0.f — (alphabet histogram regeneration — tested via scan_fasta_alphabet)
   0.g — existing overflow regression test still passes (separate file)
+  0.h — T23/T24 end-to-end integration over a real ~17.2 Mb saturating contig
+        (marked slow)
 
 Additional:
   - detect_padding_row: clean, truncate, abort cases
@@ -641,8 +644,62 @@ class TestRoundingAgreement:
         gc = round(float(num) / float(den), 5)
         return int(round(gc * 254))
 
+    def test_rounding_exhaustive_over_quantiser_domain(self):
+        """Every (numerator, length) pair with length <= 400, exhaustively.
+
+        The quantiser's output is a pure function of (num, den). The numerator
+        `cumsum[stop] - cumsum[start]` is a half-integer, and on any real contig
+        it stays under ~1e8 — far inside the range where float64 represents
+        half-integers exactly — so the subtraction is exact and two fragments
+        sharing a (num, den) always produce the same byte.
+
+        That makes random fragments a resampling of a bounded set of equivalence
+        classes rather than a source of new cases: 10^5 draws from the tiny_fasta
+        contig reach 22894 distinct classes and 10^6 reach only 32412, for ten
+        times the runtime. This enumerates all 160800 classes with den <= 400,
+        which strictly dominates any number of random draws over the same band.
+        See design §3.4 for why this replaced the original ">= 10^7 fragments".
+        """
+        max_den = 400
+        n_classes = 0
+        for den in range(1, max_den + 1):
+            # Every reachable numerator: 0, 0.5, 1.0, ... den (N contributes 0.5).
+            numerators = np.arange(0, 2 * den + 1, dtype=np.float64) * 0.5
+            k = len(numerators)
+
+            # Lay the classes out back to back with stride `den`, so fragment i
+            # is [i*den, (i+1)*den) and its numerator is numerators[i].
+            cumsum = np.zeros(k * den + 1, dtype=np.float64)
+            cumsum[den::den] = np.cumsum(numerators)
+            starts = (np.arange(k) * den).astype("int32")
+            lengths = np.full(k, den, dtype="uint16")
+            assert np.array_equal(
+                cumsum[starts.astype(np.int64) + den] - cumsum[starts], numerators
+            ), f"den={den}: synthetic cumsum does not reproduce the numerators"
+
+            actual = recompute_gc_for_contig(starts, lengths, cumsum)
+            expected = np.array(
+                [self._cpython_reference(num, den) for num in numerators],
+                dtype=np.uint8,
+            )
+            n_bad = int(np.sum(actual != expected))
+            assert n_bad == 0, (
+                f"den={den}: {n_bad} of {k} numerators disagree; first at "
+                f"num={numerators[int(np.argmax(actual != expected))]}"
+            )
+            n_classes += k
+
+        assert n_classes == 160800, n_classes
+
     def test_rounding_random_fragments(self, tiny_fasta):
-        """Rounding agreement over a large set of random fragments.
+        """Rounding agreement over random fragments drawn from a real contig.
+
+        This is the arm that exercises the real indexing path —
+        `cumsum[stop] - cumsum[start]` against a cumsum built by
+        get_g_or_c_cumsum — rather than a synthetic cumsum. Exhaustive coverage
+        of the quantiser itself is
+        test_rounding_exhaustive_over_quantiser_domain's job, which is why 10^5
+        draws suffice here (design §3.4).
 
         chr1 is a varied ACGTN mix (see the tiny_fasta docstring) so the GC
         fractions here are mostly non-terminating decimals with denominators up
@@ -1354,6 +1411,370 @@ class TestCorruptedFileAborts:
                 dry_run=False,
             )
         assert compute_file_sha256(clean_h5) == sha_before
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration across the T23 / T24 seam
+#
+# Everything above tests the three pieces of the saturation analysis in
+# isolation: simulate_float32_cumsum against a directly accumulated float32
+# array, build_n_prefix_sum against a 200 bp contig, and classify_gc_changes
+# against hand-built f32_cumsum / n_prefix inputs. Nothing joined them, and the
+# hand-built region inputs structurally cannot: reaching T24 needs ~16.8 Mb of
+# accumulated G/C, and that band is where all 218 damaged files actually live.
+#
+# The fixture below is a real ~17.2 Mb contig written to a real FASTA. The chain
+# under test is the production one end to end — get_g_or_c_cumsum ->
+# simulate_float32_cumsum -> build_n_prefix_sum -> classify_gc_changes ->
+# recompute_gc_for_contig — with no hand-constructed array anywhere in it.
+#
+# Cost: ~3 s, ~730 MB peak RSS, a 17.5 MB FASTA and a 137 MB cumsum cache in a
+# temp dir. Marked slow, like tests/test_gc_cumsum_overflow.py (~676 MB).
+# ---------------------------------------------------------------------------
+
+# Per-base contribution as a 256-entry lookup, built from the same independent
+# _GC_CONTRIBUTION table the oracle uses. Shares no code with repair.py or with
+# fragments_h5.sequence.
+_GC_LUT = np.zeros(256, dtype=np.float32)
+for _ch, _v in _GC_CONTRIBUTION.items():
+    _GC_LUT[ord(_ch)] = _v
+    _GC_LUT[ord(_ch.lower())] = _v
+
+
+def gc_contributions(sequence):
+    """Per-base C+G contributions with the builder's leading pad element.
+
+    get_g_or_c_cumsum prepends an 'a' before encoding (fragment.py:441), so the
+    accumulated value at contig position i sits at index i. The 0.0 first
+    element here reproduces that offset.
+    """
+    raw = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+    out = np.empty(len(raw) + 1, dtype=np.float32)
+    out[0] = np.float32(0.0)
+    out[1:] = _GC_LUT[raw]
+    return out
+
+
+def naive_float32_gc_uint8(f32_cumsum, starts, lengths):
+    """GC bytes exactly as the pre-fix builder produced them.
+
+    fragment.py:496 took the numerator out of the float32 accumulator and
+    divided in Python float; fragments_h5.py:845 quantised with
+    int(round(gc * 254)). Feeding a float32 cumsum here reproduces the damage.
+    """
+    out = np.empty(len(starts), dtype=np.uint8)
+    for i in range(len(starts)):
+        start = int(starts[i])
+        length = int(lengths[i])
+        num = float(f32_cumsum[start + length] - f32_cumsum[start])
+        out[i] = int(round(round(num / float(length), 5) * 254))
+    return out
+
+
+# Layout of the saturating contig. Each named block carries fragments; the
+# filler between blocks is pure G, which advances the accumulator 1.0 per base.
+SAT_BLOCK_LEN = 2500
+SAT_FRAGS_PER_BLOCK = 250
+SAT_DRIFT_N = 400_000
+SAT_BLOCKS = (
+    "below_free", "below_n", "mid_free", "mid_n", "boundary",
+    "above_free", "above_n",
+)
+
+
+def _build_saturating_sequence():
+    """A contig whose accumulated G/C crosses both 2**23 and 2**24.
+
+    Returns (sequence, {block_name: (position, length)}). The layout is chosen
+    so that every branch of the §5b region rule is exercised by real data:
+
+      below_free / below_n  — under T23, where float32 is exact to half-integers
+                              so even N-bearing spans must come back unchanged.
+      mid_free / mid_n      — inside [T23, T24), where the ulp is 1.0. N-free
+                              spans are still exact; N-bearing spans lose the
+                              0.5 to round-half-to-even and must change.
+      drift                 — a long N run inside the middle band. Adding 0.5 to
+                              an even float32 integer is a tie that rounds back
+                              to itself, so the float32 accumulator stalls
+                              completely while float64 advances 0.5 per base.
+                              This opens a ~200k-wide window in which the two
+                              accumulators disagree about which band a fragment
+                              is in. It carries no fragments; it exists to make
+                              that disagreement observable.
+      boundary              — placed in that window: float32 says middle band,
+                              float64 says above T24. N-free, so its bytes are
+                              unchanged either way and only the band counts move.
+      above_free / above_n  — past T24, where float32 has flatlined, every
+                              numerator is 0 and every stored byte is 0. This is
+                              the production corruption signature.
+    """
+    rng = np.random.RandomState(2024)
+    chunks = []
+    blocks = {}
+    acc = 0.0
+    pos = 0
+
+    def filler(target_acc):
+        nonlocal acc, pos
+        n = int(target_acc - acc)
+        assert n > 0, f"filler target {target_acc} is behind accumulator {acc}"
+        chunks.append("G" * n)
+        acc += n
+        pos += n
+
+    def block(name, seq):
+        nonlocal acc, pos
+        blocks[name] = (pos, len(seq))
+        chunks.append(seq)
+        acc += float(_GC_LUT[np.frombuffer(seq.encode("ascii"), dtype=np.uint8)].sum())
+        pos += len(seq)
+
+    def varied(n, n_frac):
+        weights = [(1 - n_frac) * w for w in (0.28, 0.25, 0.25, 0.22)] + [n_frac]
+        return "".join(rng.choice(list("ACGTN"), size=n, p=weights))
+
+    filler(T23 - 300_000)
+    block("below_free", varied(SAT_BLOCK_LEN, 0.0))
+    block("below_n", varied(SAT_BLOCK_LEN, 0.10))
+
+    filler(T23 + 400_000)
+    block("mid_free", varied(SAT_BLOCK_LEN, 0.0))
+    block("mid_n", varied(SAT_BLOCK_LEN, 0.10))
+
+    filler(T24 - 100_000)
+    block("drift", "N" * SAT_DRIFT_N)
+    block("boundary", varied(SAT_BLOCK_LEN, 0.0))
+
+    # Push float32 the rest of the way to T24 and past the flatline onset.
+    chunks.append("G" * 150_000)
+    acc += 150_000
+    pos += 150_000
+    block("above_free", varied(SAT_BLOCK_LEN, 0.0))
+    block("above_n", varied(SAT_BLOCK_LEN, 0.10))
+
+    # Trailing margin so no fragment can run off the end of the contig.
+    chunks.append("G" * 2000)
+    acc += 2000
+    pos += 2000
+    return "".join(chunks), blocks
+
+
+def _place_saturating_fragments(blocks):
+    """Sorted starts / lengths, SAT_FRAGS_PER_BLOCK inside each named block."""
+    rng = np.random.RandomState(99)
+    all_starts, all_lengths = [], []
+    for name in SAT_BLOCKS:
+        pos, width = blocks[name]
+        lengths = rng.randint(10, 250, SAT_FRAGS_PER_BLOCK).astype(np.int64)
+        starts = pos + rng.randint(0, width - 250, SAT_FRAGS_PER_BLOCK).astype(np.int64)
+        order = np.argsort(starts)
+        all_starts.append(starts[order])
+        all_lengths.append(lengths[order])
+    starts = np.concatenate(all_starts).astype("int32")
+    lengths = np.concatenate(all_lengths).astype("uint16")
+    assert np.all(np.diff(starts) >= 0), "block layout must keep starts sorted"
+    return starts, lengths
+
+
+@pytest.fixture(scope="module")
+def saturating_fixture():
+    """A damaged H5 over a contig that really crosses T23 and T24.
+
+    Yields paths plus the independently derived expectations. The big arrays are
+    dropped before yielding so the per-test peak is dominated by repair itself.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sequence, blocks = _build_saturating_sequence()
+        starts, lengths = _place_saturating_fragments(blocks)
+        stops = starts.astype(np.int64) + lengths.astype(np.int64)
+
+        contributions = gc_contributions(sequence)
+        f32_cumsum = np.cumsum(contributions)
+        f64_cumsum = np.cumsum(contributions.astype(np.float64))
+
+        damaged_gc = naive_float32_gc_uint8(f32_cumsum, starts, lengths)
+        oracle_gc = naive_gc_uint8(sequence, starts, lengths)
+
+        at_stop = f32_cumsum[stops]
+        below = at_stop < T23
+        middle = (at_stop >= T23) & (at_stop < T24)
+        above = at_stop >= T24
+
+        f64_at_stop = f64_cumsum[stops]
+        f64_bands = (
+            int(np.sum(f64_at_stop < T23)),
+            int(np.sum((f64_at_stop >= T23) & (f64_at_stop < T24))),
+            int(np.sum(f64_at_stop >= T24)),
+        )
+
+        raw = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+        is_n = raw == ord("N")
+        n_prefix = np.zeros(len(raw) + 1, dtype=np.int64)
+        n_prefix[1:] = np.cumsum(is_n)
+        has_n = (n_prefix[stops] - n_prefix[starts]) > 0
+
+        changed = damaged_gc != oracle_gc
+        expected = {
+            "total_frags": len(starts),
+            "below_T23": int(np.sum(below)),
+            "between_T23_T24": int(np.sum(middle)),
+            "above_T24": int(np.sum(above)),
+            "changed_total": int(np.sum(changed)),
+            "changed_below_T23": int(np.sum(changed & below)),
+            "changed_between_T23_T24": int(np.sum(changed & middle)),
+            "changed_between_T23_T24_no_N": int(np.sum(changed & middle & ~has_n)),
+            "changed_above_T24": int(np.sum(changed & above)),
+        }
+
+        info = {
+            "starts": starts,
+            "lengths": lengths,
+            "damaged_gc": damaged_gc,
+            "oracle_gc": oracle_gc,
+            "expected_stats": expected,
+            "f32_bands": (expected["below_T23"], expected["between_T23_T24"],
+                          expected["above_T24"]),
+            "f64_bands": f64_bands,
+            "f32_max": float(f32_cumsum.max()),
+            "n_middle_n_free": int(np.sum(middle & ~has_n)),
+            "n_below_with_n": int(np.sum(below & has_n)),
+            "n_below_with_n_changed": int(np.sum(below & has_n & changed)),
+            "n_rounding_sensitive": count_rounding_sensitive(sequence, starts, lengths),
+        }
+
+        fasta_path = os.path.join(tmpdir, "saturating.fa")
+        _write_fasta(fasta_path, [("chrT", sequence)])
+
+        h5_path = os.path.join(tmpdir, "damaged.h5")
+        _make_fragment_h5(
+            h5_path,
+            {"chrT": {"starts": starts, "lengths": lengths, "gc": damaged_gc}},
+            contig_lengths={"chrT": len(sequence)},
+        )
+
+        del sequence, contributions, f32_cumsum, f64_cumsum, raw, is_n, n_prefix
+
+        cache_dir = os.path.join(tmpdir, "cumsum_cache")
+        fasta_sha256 = compute_file_sha256(fasta_path)
+        from fragments_h5.repair import build_cumsum_cache
+        build_cumsum_cache(fasta_path, cache_dir, fasta_sha256)
+
+        info.update(
+            fasta=fasta_path, h5=h5_path,
+            cache_dir=cache_dir, fasta_sha256=fasta_sha256,
+        )
+        yield info
+
+
+@pytest.mark.slow
+class TestSaturatingContigEndToEnd:
+    """The T23/T24 seam, joined: real cumsum -> real simulation -> real rules."""
+
+    def test_fixture_actually_crosses_both_thresholds(self, saturating_fixture):
+        """Guard on the fixture: without these properties the tests below are vacuous."""
+        info = saturating_fixture
+        below, middle, above = info["f32_bands"]
+
+        # The float32 accumulator really flatlines at exactly 2**24.
+        assert info["f32_max"] == float(T24), info["f32_max"]
+
+        # All three bands carry real fragments.
+        assert below >= SAT_FRAGS_PER_BLOCK, below
+        assert middle >= SAT_FRAGS_PER_BLOCK, middle
+        assert above >= SAT_FRAGS_PER_BLOCK, above
+
+        stats = info["expected_stats"]
+        # Below T23 the ulp is <= 0.5, so half-integer N contributions survive and
+        # nothing may change — including on spans that do contain N.
+        assert info["n_below_with_n"] > 0
+        assert info["n_below_with_n_changed"] == 0
+        assert stats["changed_below_T23"] == 0
+
+        # The middle band contains both kinds of span, and only the N-bearing
+        # ones lose information.
+        assert info["n_middle_n_free"] > 0
+        assert stats["changed_between_T23_T24"] > 0
+        assert stats["changed_between_T23_T24_no_N"] == 0
+
+        # Above T24 the damage is total: every stored byte collapsed to 0.
+        assert stats["changed_above_T24"] == above
+        assert np.array_equal(
+            np.unique(info["damaged_gc"][-2 * SAT_FRAGS_PER_BLOCK:]),
+            np.array([0], dtype=np.uint8),
+        )
+
+        # The fixture can tell round(x, 5) from round(x, 4), same bar as the
+        # small e2e fixtures (test_fixtures_are_rounding_sensitive).
+        assert info["n_rounding_sensitive"] >= 3, info["n_rounding_sensitive"]
+
+        # And it can tell a float32 accumulator from a float64 one: the drift
+        # block moves a whole block of fragments across the T24 boundary.
+        assert info["f32_bands"] != info["f64_bands"], (
+            f"float32 and float64 agree on every band ({info['f32_bands']}); "
+            f"the fixture cannot detect a simulation that skips the float32 cast"
+        )
+
+    def test_dry_run_band_classification_matches_independent_accumulator(
+        self, saturating_fixture,
+    ):
+        """Every §5b statistic matches one computed from an independent float32 cumsum.
+
+        This is the seam. The numbers on the left come out of the real chain
+        (cached float64 cumsum -> simulate_float32_cumsum -> build_n_prefix_sum
+        -> classify_gc_changes); the ones on the right come from accumulating
+        the FASTA text in float32 with a lookup table written in this file.
+        """
+        info = saturating_fixture
+        report = repair_local_file(
+            local_path=info["h5"],
+            fasta_path=info["fasta"],
+            cumsum_cache_dir=info["cache_dir"],
+            fasta_sha256=info["fasta_sha256"],
+            dry_run=True,
+        )
+        assert report["status"] == "dry_run_ok"
+
+        stats = report["gc_results"]["chrT"]["stats"]
+        assert report["gc_results"]["chrT"]["violations"] == []
+        for key, want in info["expected_stats"].items():
+            assert stats[key] == want, (
+                f"{key}: chain says {stats[key]}, independent float32 "
+                f"accumulator says {want}"
+            )
+
+    def test_apply_restores_the_oracle_bytes(self, saturating_fixture):
+        """Repairing the damaged file reproduces the naive character-count oracle."""
+        import shutil
+
+        info = saturating_fixture
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "apply.h5")
+            shutil.copy2(info["h5"], target)
+
+            report = repair_local_file(
+                local_path=target,
+                fasta_path=info["fasta"],
+                cumsum_cache_dir=info["cache_dir"],
+                fasta_sha256=info["fasta_sha256"],
+                dry_run=False,
+            )
+            assert report["status"] == "ok"
+            assert report["contigs_truncated"] == 0
+
+            with h5py.File(target, "r") as f:
+                repaired = f["data/chrT/gc"][:]
+                assert np.array_equal(f["data/chrT/starts"][:], info["starts"])
+                assert np.array_equal(f["data/chrT/lengths"][:], info["lengths"])
+                assert len(json.loads(f.attrs["_repair_history"])) == 1
+
+            n_wrong = int(np.sum(repaired != info["oracle_gc"]))
+            assert n_wrong == 0, (
+                f"{n_wrong} of {len(repaired)} repaired bytes disagree with the "
+                f"independent oracle; first at index "
+                f"{int(np.argmax(repaired != info['oracle_gc']))}"
+            )
+            # And the repair really did something: the damaged input differed.
+            assert not np.array_equal(info["damaged_gc"], info["oracle_gc"])
 
 
 # ---------------------------------------------------------------------------
