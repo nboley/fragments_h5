@@ -74,6 +74,22 @@ reading the tag it was built from. What the release did correctly: the CLI
 flags genuinely were unreachable from `main.py` before this work, and exposing
 them was the right fix.
 
+**Tag `v2.10.1` deleted (2026-08-24), local and origin.** It pointed at commit
+`dbed0ae` (a merge dated 2026-06-08), which declares `version = "2.10.0"` — no
+`v2.10.0` tag ever existed — and whose source cannot build an h5 at all:
+`total_bases = sum(a[3] - a[2] ...)` computed `chunk_start - output_contig`,
+raising `TypeError: unsupported operand type(s) for -: 'int' and 'str'`. That
+accessor drifted when `output_contig` was inserted at tuple index 2; the pack and
+unpack sites were both updated correctly and this third reader, 390 lines away,
+was not. Verified by execution at `num_processes` 1, 2 and 4.
+
+The SHA is recorded here deliberately. The 48 h5 files referenced above were
+built by the `ghcr.io/nboley/fragments-h5:2.10.1` **image**, which works and is
+unaffected by the tag's removal; with the tag gone, this note is the only
+remaining git-side anchor for that artifact. The tag was deleted because a label
+that points at unbuildable source is worse than no label — but the information it
+implied is preserved here rather than destroyed.
+
 ### v2.7.0 (2026-02-11)
 
 **Fixed:**
