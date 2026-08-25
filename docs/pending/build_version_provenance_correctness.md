@@ -26,13 +26,24 @@ from `git show v2.10.1:src/fragments_h5/main.py` (added later in `f45b6f6`). A f
 
 ## Current state
 
-- Write: `fragments_h5.py:1188-1191`, unconditional, guarded only against `PackageNotFoundError` (absence = unknown).
-- Read: `fragments_h5.py:309-311` (argv + version), `.attrs.get()` → `None`.
+- Write: `fragments_h5.py`, the `f.attrs["_build_version"] = importlib.metadata.version(...)` block —
+  unconditional, guarded only against `PackageNotFoundError` (absence = unknown).
+- Read: `FragmentsH5.__init__`, the `.attrs.get("_build_argv")` / `.attrs.get("_build_version")` pair → `None` when absent.
+
+**Live demonstration, measured 2026-08-24 in the development environment:** `pyproject.toml` declares
+`2.12.1`, `git describe` reports `v2.12.1-6-g020fb8d`, and `importlib.metadata.version("fragments-h5")`
+returns **`2.11.0`** — the editable install's dist-info is frozen two releases back. An h5 built on this
+machine right now stamps itself `_build_version = "2.11.0"`. This is not a hypothesis about editable
+installs; it is the current state of the machine these releases were cut from.
 - Version is declared once, statically, at `pyproject.toml:7`. No setuptools-scm, no `__version__` in `src/`, no
   `FORMAT_VERSION` constant, and nothing anywhere branches on `_build_version`.
-- Measured git availability: `git describe --tags --always --dirty` → `v2.12.1-2-g704a630` (current tree; no
-  `-dirty`). Outside the repo, e.g. `/tmp`, it exits 128 without raising (measured). `.dockerignore` excludes
-  `.git`, so git is structurally unavailable in the container *at runtime*.
+- Measured git availability: `git describe --tags --always --dirty` succeeds inside the repo and returns a
+  value of the form `v2.12.1-2-g704a630`. **Every `v2.12.1-…` string in this document is an illustrative
+  snapshot of the format, not a current value** — it was accurate when written and was already stale a day
+  later (the tree reached `v2.12.1-6-g020fb8d`). Read them as shape, never as fact; a document arguing that
+  recorded versions go stale should not ask you to trust its own. Outside the repo, e.g. `/tmp`, the command
+  exits 128 without raising (measured). `.dockerignore` excludes `.git`, so git is structurally unavailable
+  in the container *at runtime*.
 
 **Two failure modes, both fixable — at different times.** Editable install: git works at runtime, so
 `_build_code_revision` is correct there directly. Non-editable install (container, `pip install .`): git is absent
@@ -114,6 +125,13 @@ setuptools-scm (contradicts `AGENT_CONTEXT.md:960` and the just-merged single-ve
 `__version__` in `__init__.py` (a second declaration site, still blind to a dirty tree); a structured/nested
 provenance object (over-engineered per the accepted design; stays flat).
 
+**A new attribute holding only a git SHA, absent when git is unavailable** — the obvious simpler design, and
+the one to beat. Rejected because it is absent in exactly the case that matters most: `.dockerignore:2`
+excludes `.git`, and the runtime image has no git binary, so every container-built h5 — the artifacts whose
+provenance is least traceable and which caused the motivating incident — would carry nothing at all. The
+prefix scheme exists so that case yields `baked:` rather than silence. A field that is empty precisely when
+you most need it is not a simpler solution to the same problem; it is a solution to a different, easier one.
+
 ## Implementation
 
 Single phase; no ordering dependencies.
@@ -130,10 +148,19 @@ Single phase; no ordering dependencies.
    `dist-editable:2.11.0` when not; single outer catch → `None` in **both**. The outer catch remains as a backstop
    but must never be the path a missing binary takes. The three calls together measure ~0.09s (7-run median
    0.0890s, range 0.0858-0.0947s; individually 0.0084 / 0.0681 / 0.0144s), once per built file — negligible.
-2. `fragments_h5.py:1188-1191` — leave the `_build_version` block untouched; append a conditional write of
-   `_build_code_revision` when the resolver returns non-`None`, mirroring the `_build_argv` pattern at `:1186-1187`.
-3. `fragments_h5.py:311` — append `self.build_code_revision = self._f.attrs.get("_build_code_revision")` immediately
-   after the `build_version` read.
+2. `fragments_h5.py`, the `try/except PackageNotFoundError` block that writes
+   `f.attrs["_build_version"] = importlib.metadata.version("fragments-h5")` — leave it untouched; append a
+   conditional write of `_build_code_revision` when the resolver returns non-`None`, mirroring the
+   `f.attrs["_build_argv"]` write immediately above it.
+3. `fragments_h5.py`, in `FragmentsH5.__init__`, the line
+   `self.build_version = self._f.attrs.get("_build_version")` — append
+   `self.build_code_revision = self._f.attrs.get("_build_code_revision")` immediately after it.
+
+   > **Locate both sites by grepping for the quoted attribute names, not by line number.** These
+   > references were accurate when written and had drifted by 2 and 50 lines within a day, purely from
+   > unrelated commits on a sibling branch — a reviewer duly flagged them as stale while they were still
+   > correct on `main`. Line numbers in this repo rot faster than the prose around them; a review of an
+   > earlier design here raised the identical finding. Symbol names do not rot.
 4. `docs/architecture/fragment_selection_and_build_provenance.md` §5 — add a short subsection recording that
    revision determination is deliberately library-side, unlike argv, with the reason above.
 5. `Makefile:94-97` / `Dockerfile:12-17` — in scope here: a `--build-arg` plus a generated module is bounded, not

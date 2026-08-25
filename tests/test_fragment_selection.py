@@ -350,7 +350,7 @@ def test_contig_with_zero_mapped_reads_skipped(caplog, monkeypatch):
         original_worker = fh5_module.build_sub_fragments_h5
 
         def _spy(args):
-            called_contigs.append(args[1])  # bam_contig
+            called_contigs.append(args.bam_contig)
             return original_worker(args)
 
         monkeypatch.setattr(fh5_module, "build_sub_fragments_h5", _spy)
@@ -450,7 +450,7 @@ def test_pe_contig_with_single_mapped_read_skipped(caplog, monkeypatch):
         original_worker = fh5_module.build_sub_fragments_h5
 
         def _spy(args):
-            called_contigs.append(args[1])  # bam_contig
+            called_contigs.append(args.bam_contig)
             return original_worker(args)
 
         monkeypatch.setattr(fh5_module, "build_sub_fragments_h5", _spy)

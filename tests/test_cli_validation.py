@@ -142,10 +142,11 @@ def fasta_file_path():
 
 @pytest.fixture(scope="module")
 def bam_path():
-    """Real BAM fixture (also used by tests/test_fragments_h5.py). The :782 gate
-    is only reachable with BAM input: TSV input always neutralizes single_end and
-    se_max_fragment_length before the gate is ever consulted (see
-    TestTsvNeutralization)."""
+    """Real BAM fixture (also used by tests/test_fragments_h5.py). The SE
+    length-filter gate in build_sub_fragments_h5 (`if single_end and
+    se_max_fragment_length is not None and ...`) is only reachable with BAM
+    input: TSV input always neutralizes single_end and se_max_fragment_length
+    before the gate is ever consulted (see TestTsvNeutralization)."""
     return os.path.join(DATA_DIR, "small.chr6.bam")
 
 
@@ -221,10 +222,12 @@ class TestTsvNeutralization:
     ):
         """This is a duplicate of test_single_end_neutralized_for_tsv with a more
         extreme se_max_fragment_length value (1 instead of 50). It exercises TSV
-        NEUTRALIZATION, not the :782 gate: for TSV input the neutralizer sets
-        single_end=False and se_max_fragment_length=None before the gate is ever
-        consulted, so this test would pass even if the :782 gate were deleted
-        entirely. Renamed from the former (misleadingly named)
+        NEUTRALIZATION, not the SE length-filter gate in build_sub_fragments_h5
+        (`if single_end and se_max_fragment_length is not None and ...`): for
+        TSV input the neutralizer sets single_end=False and
+        se_max_fragment_length=None before the gate is ever consulted, so this
+        test would pass even if that gate were deleted entirely. Renamed from
+        the former (misleadingly named)
         TestSeFilterGating.test_se_filter_not_applied_when_not_single_end, which
         claimed to test the gate but actually only exercised this same
         neutralization path. See TestSeFilterGating below for real gate tests."""
@@ -245,7 +248,7 @@ class TestTsvNeutralization:
 # ── SE filter gating (BAM input only — see bam_path fixture) ──
 
 class TestSeFilterGating:
-    """Verify the :782 gate in build_sub_fragments_h5:
+    """Verify the SE length-filter gate in build_sub_fragments_h5:
 
         if single_end and se_max_fragment_length is not None and (fragment.stop - fragment.start) > se_max_fragment_length:
 
@@ -261,9 +264,10 @@ class TestSeFilterGating:
         """single_end=False + se_max_fragment_length=1 must NOT filter anything.
 
         Every real fragment in the BAM fixture is far longer than 1bp, so if the
-        `single_end and` conjunct were removed from the :782 gate, the length
-        filter would apply regardless of single_end and n_fragments would
-        collapse to 0. Detects: deleting `single_end and` from the :782 gate.
+        `single_end and` conjunct were removed from the SE length-filter gate
+        in build_sub_fragments_h5, the length filter would apply regardless of
+        single_end and n_fragments would collapse to 0. Detects: deleting
+        `single_end and` from that gate.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             baseline = os.path.join(tmpdir, "baseline.h5")
@@ -291,9 +295,10 @@ class TestSeFilterGating:
         fragment, since every real fragment exceeds 1bp. This is the first test
         anywhere that the SE length filter actually removes fragments on its
         primary (BAM, single_end=True) use case. Removing the `single_end and`
-        conjunct from the :782 gate does not change this test's outcome (the
-        filter still applies either way), so this test alone does not detect
-        that mutation — it is the companion test above that does.
+        conjunct from the SE length-filter gate in build_sub_fragments_h5 does
+        not change this test's outcome (the filter still applies either way),
+        so this test alone does not detect that mutation — it is the
+        companion test above that does.
 
         build_fragments_h5 raises ValueError rather than writing an empty h5
         when zero fragments survive filtering (see the "No fragments were

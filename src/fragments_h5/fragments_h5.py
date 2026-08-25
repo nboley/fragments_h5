@@ -146,6 +146,8 @@ import multiprocessing
 import signal
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional
 
 import h5py
 import numpy
@@ -735,6 +737,27 @@ class FragmentsH5:
         self._f["fragment_length_counts"] = fragment_lengths
 
 
+@dataclass(frozen=True, slots=True)
+class SubBuildArgs:
+    input_fname: str
+    bam_contig: str
+    output_contig: str
+    chunk_start: int
+    chunk_stop: int
+    contig_length: int
+    fasta_filename: Optional[str]
+    single_end: bool
+    se_max_fragment_length: Optional[int]
+    read_gc: bool
+    read_strand: bool
+    read_methyl: bool
+    set_mapq_255_to_none: bool
+    include_duplicates: bool
+    store_fragment_end_clipped: bool
+    tmp_dir_name: str
+    min_mapq: Optional[int]
+
+
 def build_sub_fragments_h5(args):
     """Collect, assemble, and compress fragment data for a genomic chunk.
 
@@ -747,7 +770,23 @@ def build_sub_fragments_h5(args):
 
     TODO: Pass methylation data into Fragment in fetch() or remove dead code (lines 650-673).
     """
-    input_fname, bam_contig, output_contig, chunk_start, chunk_stop, contig_length, fasta_filename, single_end, se_max_fragment_length, read_gc, read_strand, read_methyl, set_mapq_255_to_none, include_duplicates, store_fragment_end_clipped, tmp_dir_name, min_mapq = args
+    input_fname = args.input_fname
+    bam_contig = args.bam_contig
+    output_contig = args.output_contig
+    chunk_start = args.chunk_start
+    chunk_stop = args.chunk_stop
+    contig_length = args.contig_length
+    fasta_filename = args.fasta_filename
+    single_end = args.single_end
+    se_max_fragment_length = args.se_max_fragment_length
+    read_gc = args.read_gc
+    read_strand = args.read_strand
+    read_methyl = args.read_methyl
+    set_mapq_255_to_none = args.set_mapq_255_to_none
+    include_duplicates = args.include_duplicates
+    store_fragment_end_clipped = args.store_fragment_end_clipped
+    tmp_dir_name = args.tmp_dir_name
+    min_mapq = args.min_mapq
 
     if is_fragment_file(input_fname):
         input_to_fragments = tsv_to_fragments
@@ -1099,13 +1138,24 @@ def build_fragments_h5(
             chunk_size = contig_len if skip_chunking else GENOMIC_CHUNK_SIZE
             for chunk_start in range(0, contig_len, chunk_size):
                 chunk_stop = min(chunk_start + chunk_size, contig_len)
-                args.append((
-                    input_fname, bam_contig, output_contig,
-                    chunk_start, chunk_stop, contig_len,
-                    fasta_filename, single_end, se_max_fragment_length,
-                    read_gc, read_strand, read_methyl, set_mapq_255_to_none,
-                    include_duplicates, store_fragment_end_clipped, tmp_dir,
-                    min_mapq,
+                args.append(SubBuildArgs(
+                    input_fname=input_fname,
+                    bam_contig=bam_contig,
+                    output_contig=output_contig,
+                    chunk_start=chunk_start,
+                    chunk_stop=chunk_stop,
+                    contig_length=contig_len,
+                    fasta_filename=fasta_filename,
+                    single_end=single_end,
+                    se_max_fragment_length=se_max_fragment_length,
+                    read_gc=read_gc,
+                    read_strand=read_strand,
+                    read_methyl=read_methyl,
+                    set_mapq_255_to_none=set_mapq_255_to_none,
+                    include_duplicates=include_duplicates,
+                    store_fragment_end_clipped=store_fragment_end_clipped,
+                    tmp_dir_name=tmp_dir,
+                    min_mapq=min_mapq,
                 ))
 
         if skipped_contigs:
@@ -1117,7 +1167,7 @@ def build_fragments_h5(
             )
 
         # Total genomic bases to process, for progress tracking
-        total_bases = sum(a[4] - a[3] for a in args)  # chunk_stop - chunk_start
+        total_bases = sum(a.chunk_stop - a.chunk_start for a in args)
 
         if num_processes is not None and num_processes != 1:
             # Use 'fork' for fast startup with minimal overhead.
