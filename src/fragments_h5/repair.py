@@ -285,6 +285,78 @@ def truncate_contig_datasets(f, contig):
         )
 
 
+def should_index_contig(n_frags, contig_length, index_block_size):
+    """The builder's two index-eligibility guards (fragments_h5.py:1225-1241).
+
+    Shared by rebuild_contig_index (which acts on it) and predict_index_contigs
+    (which forecasts it before any mutation), so the two cannot drift apart.
+    """
+    # Guard 1: skip contigs shorter than index block size
+    # Guard 2: skip contigs with too few reads
+    return contig_length > index_block_size and n_frags >= MIN_NUM_READS_FOR_INDEX
+
+
+def predict_index_contigs(post_counts, contig_lengths, index_block_size):
+    """Which contigs a rebuild will index, given post-truncation fragment counts.
+
+    Pure function of in-memory state, so the index key set can be validated
+    before the file is touched (§3.2.3).
+    """
+    return {
+        contig
+        for contig, n_frags in post_counts.items()
+        if should_index_contig(n_frags, contig_lengths.get(contig, 0), index_block_size)
+    }
+
+
+def validate_index_key_change(
+    existing, predicted, pre_counts, post_counts, contig_lengths, index_block_size
+):
+    """Check the predicted index key set against the file's current one.
+
+    The index key set is expected to be stable across a repair; a change means
+    the rebuild reshaped the index, which is a hard abort. The one legitimate
+    exception is a contig whose only disqualification is the read-count
+    threshold: dropping the phantom row can take a contig from exactly
+    MIN_NUM_READS_FOR_INDEX down to MIN_NUM_READS_FOR_INDEX - 1, at which point
+    the builder would not have indexed it either.
+
+    Returns the set of contigs legitimately leaving the index. Raises
+    RepairAbort for any other difference.
+    """
+    added = predicted - existing
+    if added:
+        raise RepairAbort(
+            f"Index key set changed: contigs gained an index: {sorted(added)}"
+        )
+
+    dropped = set()
+    unexplained = set()
+    for contig in existing - predicted:
+        crossed_threshold = (
+            pre_counts[contig] >= MIN_NUM_READS_FOR_INDEX
+            > post_counts[contig]
+        )
+        long_enough = contig_lengths.get(contig, 0) > index_block_size
+        if crossed_threshold and long_enough:
+            dropped.add(contig)
+        else:
+            unexplained.add(contig)
+
+    if unexplained:
+        detail = ", ".join(
+            f"{c} (n {pre_counts[c]} -> {post_counts[c]}, "
+            f"contig_length={contig_lengths.get(c, 0)})"
+            for c in sorted(unexplained)
+        )
+        raise RepairAbort(
+            f"Index key set changed: contigs lost an index for reasons other than "
+            f"falling below MIN_NUM_READS_FOR_INDEX={MIN_NUM_READS_FOR_INDEX}: {detail}"
+        )
+
+    return dropped
+
+
 def rebuild_contig_index(f, contig, contig_length, index_block_size):
     """Rebuild index for a contig from the (truncated) starts array (§3.2.3).
 
@@ -294,14 +366,7 @@ def rebuild_contig_index(f, contig, contig_length, index_block_size):
     n_frags = len(starts)
     index_key = f"index/{contig}"
 
-    # Guard 1: skip contigs shorter than index block size
-    if contig_length <= index_block_size:
-        if index_key in f:
-            del f[index_key]
-        return False
-
-    # Guard 2: skip contigs with too few reads
-    if n_frags < MIN_NUM_READS_FOR_INDEX:
+    if not should_index_contig(n_frags, contig_length, index_block_size):
         if index_key in f:
             del f[index_key]
         return False
@@ -712,6 +777,8 @@ def repair_local_file(
         report["truncation_verdicts"] = truncation_verdicts
         report["contigs_truncated"] = len(truncated_contigs)
 
+        pre_counts = {c: len(contig_arrays[c]["starts"]) for c in contigs}
+
         # Truncate in memory
         for contig in truncated_contigs:
             for ds_name, arr in contig_arrays[contig].items():
@@ -726,9 +793,25 @@ def repair_local_file(
                         f"Contig {contig}: starts not non-decreasing after truncation"
                     )
 
-        # Record existing index key set
+        # Record existing index key set, and validate the post-repair one *now* —
+        # before the file is touched — so an unexpected reshape aborts with the
+        # file still pristine rather than half-written (§3.2.3).
         existing_index_contigs = set(f["index"].keys()) if "index" in f else set()
         report["existing_index_contigs"] = sorted(existing_index_contigs)
+
+        post_counts = {c: len(contig_arrays[c]["starts"]) for c in contigs}
+        predicted_index_contigs = predict_index_contigs(
+            post_counts, contig_lengths, index_block_size
+        )
+        dropped_index_contigs = validate_index_key_change(
+            existing_index_contigs,
+            predicted_index_contigs,
+            pre_counts,
+            post_counts,
+            contig_lengths,
+            index_block_size,
+        )
+        report["index_contigs_dropped"] = sorted(dropped_index_contigs)
 
         # Record old fragment_length_counts
         old_flc = f["fragment_length_counts"][:] if "fragment_length_counts" in f else None
@@ -837,12 +920,14 @@ def repair_local_file(
             if rebuild_contig_index(f, contig, contig_len, index_block_size):
                 new_index_contigs.add(contig)
 
-        # Verify index key set matches
-        if new_index_contigs != existing_index_contigs:
-            added = new_index_contigs - existing_index_contigs
-            removed = existing_index_contigs - new_index_contigs
+        # The legitimacy of the key set was settled before the write; all that is
+        # left is that the rebuild did what the prediction said it would.
+        if new_index_contigs != predicted_index_contigs:
+            added = new_index_contigs - predicted_index_contigs
+            removed = predicted_index_contigs - new_index_contigs
             raise RepairAbort(
-                f"Index key set changed: added={added}, removed={removed}"
+                f"Index rebuild disagreed with the pre-write prediction: "
+                f"unexpectedly indexed={sorted(added)}, unexpectedly missing={sorted(removed)}"
             )
 
         # Write repair history
@@ -955,6 +1040,11 @@ def _log_report(report):
         logger.info("  n_fragments before: %s", report.get("old_n_fragments"))
     if report.get("new_n_fragments") is not None:
         logger.info("  n_fragments after: %s", report.get("new_n_fragments"))
+    if report.get("index_contigs_dropped"):
+        logger.info(
+            "  Contigs dropping below MIN_NUM_READS_FOR_INDEX=%d after truncation: %s",
+            MIN_NUM_READS_FOR_INDEX, report["index_contigs_dropped"],
+        )
 
     gc_results = report.get("gc_results", {})
     total_changed = 0

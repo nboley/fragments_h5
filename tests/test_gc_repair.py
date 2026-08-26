@@ -40,8 +40,10 @@ from fragments_h5.repair import (
     compute_file_sha256,
     detect_padding_row,
     hash_attrs_excluding,
+    predict_index_contigs,
     recompute_gc_for_contig,
     rebuild_contig_index,
+    should_index_contig,
     repair_local_file,
     scan_fasta_alphabet,
     simulate_float32_cumsum,
@@ -1976,6 +1978,255 @@ class TestIndexRebuild:
             with h5py.File(h5_path, "r+") as f:
                 rebuilt = rebuild_contig_index(f, "chr1", 100000, INDEX_BLOCK_SIZE)
                 assert not rebuilt
+
+
+# ---------------------------------------------------------------------------
+# Index eligibility exactly AT the thresholds
+#
+# Both index guards are inequalities against a named constant, and the
+# interesting behaviour of an inequality lives on the boundary, not near it.
+# test_index_skip_few_reads uses 99 reads and test_index_skip_short_contig uses
+# 4999 bp — each one step outside the threshold, so neither pins down which side
+# of the boundary the constant sits on. A production file (RD-56670-Lib1,
+# chrUn_KI270507v1) had exactly MIN_NUM_READS_FOR_INDEX rows *including the
+# phantom padding row*; truncation took it to MIN-1, it correctly left the index,
+# and the repair tool aborted mid-write because its index key-set invariant did
+# not allow for that. These tests sit exactly on both boundaries.
+# ---------------------------------------------------------------------------
+
+class TestIndexThresholdBoundaries:
+
+    @pytest.mark.parametrize("n_frags, expected", [
+        (MIN_NUM_READS_FOR_INDEX - 1, False),
+        (MIN_NUM_READS_FOR_INDEX, True),        # the boundary itself
+        (MIN_NUM_READS_FOR_INDEX + 1, True),
+    ])
+    def test_read_count_guard_is_inclusive_at_the_threshold(self, n_frags, expected):
+        """n >= MIN_NUM_READS_FOR_INDEX is indexed; the threshold value qualifies."""
+        assert should_index_contig(n_frags, 100000, INDEX_BLOCK_SIZE) is expected
+
+    @pytest.mark.parametrize("contig_length, expected", [
+        (INDEX_BLOCK_SIZE - 1, False),
+        (INDEX_BLOCK_SIZE, False),              # the boundary itself
+        (INDEX_BLOCK_SIZE + 1, True),
+    ])
+    def test_length_guard_is_exclusive_at_the_threshold(self, contig_length, expected):
+        """contig_length > index_block_size is indexed; the threshold value does not."""
+        assert should_index_contig(200, contig_length, INDEX_BLOCK_SIZE) is expected
+
+    def test_rebuild_at_exactly_the_read_threshold(self):
+        """rebuild_contig_index agrees with the predicate on both sides of MIN."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for n, expect_index in (
+                (MIN_NUM_READS_FOR_INDEX, True),
+                (MIN_NUM_READS_FOR_INDEX - 1, False),
+            ):
+                h5_path = os.path.join(tmpdir, f"n{n}.h5")
+                _make_fragment_h5(h5_path, {
+                    "chr1": {
+                        "starts": np.arange(0, 10 * n, 10, dtype="int32"),
+                        "lengths": np.full(n, 5, dtype="uint16"),
+                    },
+                }, contig_lengths={"chr1": 100000})
+
+                with h5py.File(h5_path, "r+") as f:
+                    rebuilt = rebuild_contig_index(f, "chr1", 100000, INDEX_BLOCK_SIZE)
+                    assert rebuilt is expect_index, f"n={n}"
+                    assert ("chr1" in f["index"]) is expect_index, f"n={n}"
+
+    def test_predict_matches_rebuild_at_the_boundary(self):
+        """The pre-write forecast and the actual rebuild cannot disagree.
+
+        The forecast is what makes the key-set check possible before any
+        mutation, so it must track rebuild_contig_index exactly — including at
+        the threshold, where the two used to be written out separately.
+        """
+        cases = {
+            "at_threshold": MIN_NUM_READS_FOR_INDEX,
+            "below_threshold": MIN_NUM_READS_FOR_INDEX - 1,
+        }
+        contig_lengths = {c: 100000 for c in cases}
+
+        predicted = predict_index_contigs(cases, contig_lengths, INDEX_BLOCK_SIZE)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            h5_path = os.path.join(tmpdir, "both.h5")
+            _make_fragment_h5(h5_path, {
+                c: {
+                    "starts": np.arange(0, 10 * n, 10, dtype="int32"),
+                    "lengths": np.full(n, 5, dtype="uint16"),
+                }
+                for c, n in cases.items()
+            }, contig_lengths=contig_lengths)
+
+            actual = set()
+            with h5py.File(h5_path, "r+") as f:
+                for c in cases:
+                    if rebuild_contig_index(f, c, 100000, INDEX_BLOCK_SIZE):
+                        actual.add(c)
+
+        assert predicted == actual == {"at_threshold"}
+
+
+# ---------------------------------------------------------------------------
+# A contig sitting exactly ON the read threshold, end-to-end (§3.2.3)
+# ---------------------------------------------------------------------------
+
+# Absent from the FASTA (so gc is all-255 and needs no reference), but long
+# enough to clear the length guard, and carrying exactly
+# MIN_NUM_READS_FOR_INDEX rows once the phantom row is included. This is the
+# shape of chrUn_KI270507v1 in RD-56670-Lib1.
+THRESHOLD_NAME = "chrUn_threshold99"
+THRESHOLD_LEN = 6000
+THRESHOLD_N_REAL = MIN_NUM_READS_FOR_INDEX - 1
+
+
+def _threshold_contig():
+    starts = np.sort(
+        np.random.RandomState(310).randint(1, THRESHOLD_LEN - 300, THRESHOLD_N_REAL)
+    ).astype("int32")
+    lengths = np.random.RandomState(311).randint(
+        10, 200, THRESHOLD_N_REAL
+    ).astype("uint16")
+    return {
+        "starts": starts,
+        "lengths": lengths,
+        "gc": np.full(THRESHOLD_N_REAL, 255, dtype="uint8"),
+    }
+
+
+class TestContigLeavesIndexAtThreshold:
+    """A contig that drops below MIN_NUM_READS_FOR_INDEX purely because
+    truncation removed its phantom row must not fail the repair."""
+
+    @pytest.fixture
+    def threshold_h5(self, tiny_fasta):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            contigs = _build_fixture_contigs(tiny_fasta, (50, 51, 52, 53))
+            contigs[THRESHOLD_NAME] = _threshold_contig()
+            path = os.path.join(tmpdir, "threshold.h5")
+            _make_fragment_h5(
+                path, contigs, add_padding=True,
+                contig_lengths=dict(
+                    FIXTURE_CONTIG_LENGTHS, **{THRESHOLD_NAME: THRESHOLD_LEN}
+                ),
+            )
+            yield path
+
+    def test_fixture_sits_exactly_on_the_threshold(self, threshold_h5):
+        """Guard the fixture itself: off by one either way and the test is vacuous."""
+        with h5py.File(threshold_h5, "r") as f:
+            n_with_phantom = len(f[f"data/{THRESHOLD_NAME}/starts"])
+            assert n_with_phantom == MIN_NUM_READS_FOR_INDEX
+            assert THRESHOLD_NAME in f["index"], (
+                "contig must start out indexed, or there is nothing to lose"
+            )
+            assert f.attrs["index_block_size"] < THRESHOLD_LEN, (
+                "contig must clear the length guard, or the drop has two causes"
+            )
+
+    def test_apply_succeeds_and_contig_leaves_the_index(
+        self, threshold_h5, tiny_fasta, cumsum_cache
+    ):
+        """The whole repair completes; the contig is legitimately unindexed."""
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        report = repair_local_file(
+            local_path=threshold_h5,
+            fasta_path=tiny_fasta,
+            cumsum_cache_dir=cache_dir,
+            fasta_sha256=fasta_sha256,
+            dry_run=False,
+        )
+
+        assert report["status"] == "ok"
+        assert report["index_contigs_dropped"] == [THRESHOLD_NAME]
+
+        with h5py.File(threshold_h5, "r") as f:
+            assert len(f[f"data/{THRESHOLD_NAME}/starts"]) == THRESHOLD_N_REAL
+            assert THRESHOLD_NAME not in f["index"]
+            # every other contig kept its index
+            assert set(f["index"].keys()) == {"chr1"}
+
+    def test_dry_run_reports_the_drop(self, threshold_h5, tiny_fasta, cumsum_cache):
+        """The drop is visible before --apply, because it is decided pre-write."""
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        report = repair_local_file(
+            local_path=threshold_h5,
+            fasta_path=tiny_fasta,
+            cumsum_cache_dir=cache_dir,
+            fasta_sha256=fasta_sha256,
+            dry_run=True,
+        )
+
+        assert report["status"] == "dry_run_ok"
+        assert report["index_contigs_dropped"] == [THRESHOLD_NAME]
+
+
+class TestIndexKeySetStillGuarded:
+    """The threshold exemption must not blunt the invariant."""
+
+    @pytest.fixture
+    def bogus_index_h5(self, tiny_fasta):
+        """A padded file carrying an index on a contig too short to have one.
+
+        Nothing about truncation explains losing this index, so the rebuild
+        reshaping the key set is exactly the corruption the invariant exists to
+        catch.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            contigs = _build_fixture_contigs(tiny_fasta, (50, 51, 52, 53))
+            path = os.path.join(tmpdir, "bogus.h5")
+            _make_fragment_h5(
+                path, contigs, add_padding=True,
+                contig_lengths=FIXTURE_CONTIG_LENGTHS,
+            )
+            with h5py.File(path, "r+") as f:
+                assert FIXTURE_CONTIG_LENGTHS["chr2"] <= f.attrs["index_block_size"]
+                assert "chr2" not in f["index"]
+                f["index/chr2"] = np.array([0, len(f["data/chr2/starts"])])
+            yield path
+
+    def test_unexplained_index_loss_still_aborts(
+        self, bogus_index_h5, tiny_fasta, cumsum_cache
+    ):
+        cache_dir, fasta_sha256 = cumsum_cache
+
+        with pytest.raises(RepairAbort, match="Index key set changed"):
+            repair_local_file(
+                local_path=bogus_index_h5,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=False,
+            )
+
+    def test_unexplained_index_loss_aborts_before_writing(
+        self, bogus_index_h5, tiny_fasta, cumsum_cache
+    ):
+        """The abort leaves the file byte-identical — no partial repair.
+
+        On RD-56670-Lib1 this check fired *after* the datasets had been
+        rewritten, growing the file from 64,941,883 to 74,417,833 bytes and
+        leaving a half-repaired file behind. Validating the key set from
+        in-memory state removes that window.
+        """
+        cache_dir, fasta_sha256 = cumsum_cache
+        before = compute_file_sha256(bogus_index_h5)
+        size_before = os.path.getsize(bogus_index_h5)
+
+        with pytest.raises(RepairAbort):
+            repair_local_file(
+                local_path=bogus_index_h5,
+                fasta_path=tiny_fasta,
+                cumsum_cache_dir=cache_dir,
+                fasta_sha256=fasta_sha256,
+                dry_run=False,
+            )
+
+        assert compute_file_sha256(bogus_index_h5) == before
+        assert os.path.getsize(bogus_index_h5) == size_before
 
 
 # ---------------------------------------------------------------------------

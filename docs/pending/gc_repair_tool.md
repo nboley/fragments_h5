@@ -507,10 +507,37 @@ when servicing queries (`:306`, `:485`). A rebuild that used the module constant
 would produce an index the query path indexes into with the wrong stride, silently and without
 error. Read the attr.
 
-**Blocking invariant:** the rebuilt index's *key set* must equal the existing one. A contig that
-gains or loses an index entirely means either the guards were evaluated differently at build time or
-the truncation crossed the `MIN_NUM_READS_FOR_INDEX` boundary (possible only for a contig with
-exactly 100 rows including the phantom). Either way, **abort the file** and require review.
+**Blocking invariant:** the rebuilt index's *key set* must equal the existing one, with exactly one
+exemption. A contig that gains or loses an index entirely means either the guards were evaluated
+differently at build time or the truncation crossed the `MIN_NUM_READS_FOR_INDEX` boundary (possible
+only for a contig with exactly 100 rows including the phantom).
+
+Earlier revisions of this document called for aborting on **either** cause. That was wrong, and it
+was found the only way it could be — by running `--apply` on a real file. `RD-56670-Lib1` carries
+`chrUn_KI270507v1` with exactly 100 rows including the phantom and `contig_length = 5353 > 5000`, so
+it is indexed today; truncation takes it to 99 and the builder's own guard would not index it. The
+rebuild was **correct** and the invariant aborted the file anyway. Of the 180 contigs in that file,
+exactly one sits on the boundary and none join the index.
+
+So: a contig **leaving** the index is permitted precisely when truncation is what pushed it below
+the threshold — `pre_count >= MIN_NUM_READS_FOR_INDEX > post_count` **and**
+`contig_length > index_block_size`. Every other difference — a contig gaining an index, or losing
+one while still clearing both guards, or losing one because of the *length* guard (which truncation
+cannot change, so a file that had such an index was built by different rules) — remains a hard
+abort. That is the reshaping this invariant exists to catch.
+
+**Compute this before writing anything.** The membership decision is a pure function of the
+post-truncation row counts, `contig_lengths` and `index_block_size`, all of which are known during
+analysis while the file is still open read-only. Validating it there rather than after the rebuild
+is not a mitigation of the partial-write window, it removes it: `predict_index_contigs` forecasts
+the key set from in-memory state, `validate_index_key_change` accepts or aborts, and the post-write
+check degrades to "the rebuild did what the forecast said", which is the only part that genuinely
+needs the written file. On `RD-56670-Lib1` the original ordering aborted *after* rewriting every
+dataset, growing the file 64,941,883 → 74,417,833 bytes and leaving a half-repaired H5 with no
+ledger record.
+
+To keep the forecast and the rebuild from drifting apart, both call one predicate,
+`should_index_contig(n_frags, contig_length, index_block_size)`.
 
 **Blocking invariant:** after truncation `starts` must be non-decreasing on every contig. Assert it
 directly — it is one `numpy.diff(...).min() >= 0` per contig and it is the property the index and
