@@ -900,13 +900,25 @@ carry it through deterministically (subject to §3.4's `round(x, 5)` care).
 the observed 34–43 Mb breakpoints. And because there are 161.3M `N` bases, the intermediate band of
 §2.1 is genuinely populated.
 
-**Consequence 5 — the cumsum error is piecewise constant, and this is what licenses §5b's
-middle-band rule.** In `[2**23, 2**24)` the `+1.0` steps at C/G positions are exact, so the
-difference `err(i) = float32_cumsum(i) − true_cumsum(i)` **cannot change at a C/G or A/T position**;
-it changes only where an `N` is consumed. Therefore for any span `[start, stop)` containing no `N`,
-`err(stop) − err(start) = 0`, and the recomputed `gc` for that fragment must equal the stored `gc`
-exactly. That is a proof, not a heuristic, and it is precisely §5b's predicate: in the middle band,
-**a change is permitted only if the span contains an `N`.**
+**Consequence 5 — the cumsum error is piecewise constant *within* `[2**23, 2**24)`, with one
+exception at entry.** Inside the band the `+1.0` steps at C/G positions are exact (the representable
+set is exactly the integers), so the difference `err(i) = float32_cumsum(i) − true_cumsum(i)`
+**cannot change at a C/G or A/T position**; it changes only where an `N` is consumed. For any span
+`[start, stop)` lying entirely within the band and containing no `N`,
+`err(stop) − err(start) = 0`, and the recomputed `gc` must equal the stored `gc` exactly.
+
+**The proof is sound within the band but wrong about how the accumulator enters it.** Below `2**23`,
+float32 represents half-integers exactly, so the accumulator can legitimately arrive at the boundary
+holding `2**23 − 0.5 = 8,388,607.5`. Adding `+1.0` for a G/C gives `8,388,608.5`, which is *not*
+representable in `[2**23, 2**24)` (only integers are), so it rounds to `8,388,608.0` — a `−0.5`
+error on a **non-N** base. This is the unique position per contig where the error changes without an
+`N` in the middle band. Verified by direct measurement: `chr20` pos 20,261,738, `chr1` pos
+16,964,628, both with `f64_before = 8,388,607.5` and `err` jumping `+0.0 → −0.5`.
+
+The corrected §5b rule: a middle-band change is permitted if the span contains an `N` **or** spans
+the `2**23` crossing position. The crossing position is derived from the simulated float32
+accumulator — it is the unique index where the accumulator first reaches `≥ 2**23` while holding a
+half-integer just before.
 
 **This is conditional on the reference, and the tool enforces the condition.** `sequence.pyx` still
 maps B/V/H/D to thirds; a different FASTA could reach them. The argument above is valid only on the
@@ -914,8 +926,8 @@ alphabet `{A,C,G,T,N}`, so the tool **refuses to run** on any FASTA whose sequen
 anything else (§5 layer 5). That gate is load-bearing, not ceremonial: see §7.2 for why B/V/H/D
 would have collapsed the oracle to nothing.
 
-**Grade: the conclusion holds and the proof now rests on a measurement rather than on an assumption
-about the reference.**
+**Grade: the conclusion was wrong at the boundary, corrected after a 5-file pilot found 4/5 aborting.
+The proof was sound within the band; the flaw was assuming the accumulator enters it at an integer.**
 
 ### 4.3 Residual assumptions, and how to discharge each
 
@@ -1067,17 +1079,27 @@ margin would also work, but the simulation is exact, cheap, and needs no margin 
 | region (simulated float32 `cumsum(frag_stop)`) | rule | on violation |
 |---|---|---|
 | `< T23` | **byte-identical required** | hard error — abort the file |
-| `T23 <= … < T24` | change permitted **only** if the fragment's span `[start, stop)` contains at least one `N` base | hard error — abort the file |
+| `T23 <= … < T24` | change permitted if the span contains an `N` **or** spans the T23 half-integer crossing position (see below) | hard error — abort the file |
 | `>= T24` | change freely | — |
 
 The `< T23` row **is** the §7.2 pre-saturation oracle — the same check under two names in earlier
 drafts. It is stated once, here, and §7.2 explains why the bound is 2**23 rather than 2**24.
 
-The middle-band predicate is cheap: the tool already has the FASTA and `N` is the only non-ACGT code
-(§4.2), so a per-contig boolean N-mask plus its prefix-sum answers "does this span contain an N" in
-O(1) per fragment. It is also *sound* rather than merely plausible — §4.2 Consequence 5 proves the
-float32 cumsum error is piecewise constant, changing only at `N` positions, so an N-free span has
-zero error difference and must be byte-identical.
+**The T23 crossing position.** Below `2**23`, float32 represents half-integers exactly. If the
+accumulator arrives at `2**23 − 0.5 = 8,388,607.5` and the next base is G/C (`+1.0`), the result
+`8,388,608.5` is not representable in `[2**23, 2**24)` (only integers), so it rounds to
+`8,388,608.0` — producing a `−0.5` error on a non-N base. This is at most one position per contig.
+The tool derives it from the simulated float32 accumulator: `find_t23_crossing` returns the unique
+index where the accumulator first reaches `≥ T23` while holding a half-integer just before, via a
+G/C step (not an N step, which would be exact). The tool also **verifies** that each permitted N-free
+middle-band change spans this crossing, and aborts if one does not — converting the mechanism
+assertion into a permanent guard rather than just allowing the change.
+
+The middle-band N-predicate is cheap: the tool already has the FASTA and `N` is the only non-ACGT
+code (§4.2), so a per-contig boolean N-mask plus its prefix-sum answers "does this span contain an
+N" in O(1) per fragment. The crossing check adds O(1) per fragment (one comparison against the
+pre-computed crossing index). Within the band the error is piecewise constant, changing only at `N`
+positions and at the one crossing position (§4.2 Consequence 5, corrected).
 
 **Do not expect the middle-band changes to be tiny where they occur.** The *count* is small, because
 reads essentially never align inside hard-masked blocks. But the *magnitude* is not: where a fragment

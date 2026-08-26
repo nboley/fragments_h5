@@ -39,6 +39,7 @@ from fragments_h5.repair import (
     classify_gc_changes,
     compute_file_sha256,
     detect_padding_row,
+    find_t23_crossing,
     hash_attrs_excluding,
     predict_index_contigs,
     recompute_gc_for_contig,
@@ -1498,6 +1499,72 @@ class TestRegionClassification:
         assert stats["above_T24"] == 1
         assert stats["changed_above_T24"] == 1
 
+    # -- T23 half-integer crossing (pilot finding 2026-08-26) ----------------
+    #
+    # Below T23, float32 represents half-integers exactly. If the accumulator
+    # arrives at T23 - 0.5 = 8,388,607.5 and the next base is G/C (+1.0), the
+    # result 8,388,608.5 is not representable in [T23, T24) (only integers),
+    # so it rounds to 8,388,608.0 — a -0.5 error on a non-N base. This is
+    # the one position per contig where the middle-band error can change
+    # without an N, and fragments spanning it legitimately change GC.
+
+    def test_middle_band_n_free_change_spanning_t23_crossing_permitted(self):
+        """An N-free fragment spanning the T23 half-integer crossing is allowed."""
+        crossing_idx = 15
+        size = 30
+        f32_cumsum = np.zeros(size, dtype=np.float32)
+        for i in range(size):
+            if i < crossing_idx:
+                f32_cumsum[i] = np.float32(T23 - 100 + i)
+            else:
+                f32_cumsum[i] = np.float32(T23 + (i - crossing_idx))
+        # The value just before the crossing is a half-integer
+        f32_cumsum[crossing_idx - 1] = np.float32(T23 - 0.5)
+
+        # Fragment spans [10, 20): covers crossing at 15
+        starts = np.array([10], dtype=np.int32)
+        lengths = np.array([10], dtype=np.uint16)
+
+        # No N in the span
+        n_prefix = np.zeros(size, dtype=np.int64)
+
+        old_gc = np.array([100], dtype=np.uint8)
+        new_gc = np.array([101], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert violations == [], f"Expected no violations but got: {violations}"
+        assert stats["changed_between_T23_T24"] == 1
+        assert stats["changed_between_T23_T24_no_N"] == 0
+
+    def test_middle_band_n_free_change_not_spanning_t23_crossing_blocked(self):
+        """An N-free middle-band change NOT spanning the T23 crossing is still blocked."""
+        crossing_idx = 15
+        size = 30
+        f32_cumsum = np.zeros(size, dtype=np.float32)
+        for i in range(size):
+            if i < crossing_idx:
+                f32_cumsum[i] = np.float32(T23 - 100 + i)
+            else:
+                f32_cumsum[i] = np.float32(T23 + (i - crossing_idx))
+        f32_cumsum[crossing_idx - 1] = np.float32(T23 - 0.5)
+
+        # Fragment starts PAST the crossing: [20, 25)
+        starts = np.array([20], dtype=np.int32)
+        lengths = np.array([5], dtype=np.uint16)
+        n_prefix = np.zeros(size, dtype=np.int64)
+
+        old_gc = np.array([100], dtype=np.uint8)
+        new_gc = np.array([101], dtype=np.uint8)
+
+        stats, violations = classify_gc_changes(
+            old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix
+        )
+        assert len(violations) == 1
+        assert "N-free" in violations[0]
+        assert stats["changed_between_T23_T24_no_N"] == 1
+
 
 class TestCorruptedFileAborts:
     """End-to-end: a file whose gc disagrees below T23 must fail closed."""
@@ -1912,6 +1979,116 @@ class TestSaturatingContigEndToEnd:
             )
             # And the repair really did something: the damaged input differed.
             assert not np.array_equal(info["damaged_gc"], info["oracle_gc"])
+
+
+# ---------------------------------------------------------------------------
+# T23 half-integer crossing end-to-end
+#
+# Below T23, float32 represents half-integers exactly, so the accumulator can
+# arrive at 8,388,607.5. Adding 1.0 for a G/C gives 8,388,608.5, not
+# representable in [T23, T24) (only integers), so it rounds to 8,388,608.0.
+# This is the one non-N error-change position per contig.
+#
+# The fixture deterministically produces the crossing: 8,388,607 G's + 1 N +
+# trailing G's. The float64 cumsum is built directly (not from a FASTA) so the
+# test avoids writing an 8.4 MB file, but the float32 accumulation is real —
+# simulate_float32_cumsum runs actual numpy float32 cumsum over the diffs.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def t23_crossing_fixture():
+    """Float32 accumulator crossing T23 from a half-integer, exercised for real.
+
+    Sequence layout: 8,388,607 G's + 1 N + 2000 G's.
+    Cumsum: [..., 8388607.0, 8388607.5, 8388608.0(f32)/8388608.5(f64), ...]
+    Crossing at cumsum index 8,388,609.
+    """
+    n_g_before = 8_388_607
+    n_trailing = 2000
+    cumsum_size = n_g_before + 1 + n_trailing + 1  # bases + leading pad
+
+    # Build float64 cumsum: all-G contributes 1.0 each, one N contributes 0.5
+    float64_cumsum = np.arange(cumsum_size, dtype=np.float64)
+    float64_cumsum[n_g_before + 1:] -= 0.5  # N contributed 0.5, not 1.0
+
+    # Real float32 simulation
+    f32_cumsum = simulate_float32_cumsum(float64_cumsum)
+    n_prefix = build_n_prefix_sum(float64_cumsum)
+
+    crossing_idx = n_g_before + 2  # 8,388,609
+
+    # Sequence for the oracle
+    sequence = "G" * n_g_before + "N" + "G" * n_trailing
+
+    # Fragments: (D) below T23, (C) spans N + crossing, (A) spans crossing no N,
+    #            (B) past crossing no N
+    starts = np.array([
+        1000,                    # D: well below T23
+        crossing_idx - 2,        # C: spans N + crossing
+        crossing_idx - 1,        # A: spans crossing, no N
+        crossing_idx,            # B: just past crossing
+    ], dtype=np.int32)
+    lengths = np.array([100, 3, 2, 100], dtype=np.uint16)
+
+    damaged_gc = naive_float32_gc_uint8(f32_cumsum, starts, lengths)
+    oracle_gc = naive_gc_uint8(sequence, starts, lengths)
+
+    yield {
+        "f32_cumsum": f32_cumsum,
+        "float64_cumsum": float64_cumsum,
+        "n_prefix": n_prefix,
+        "starts": starts,
+        "lengths": lengths,
+        "damaged_gc": damaged_gc,
+        "oracle_gc": oracle_gc,
+        "crossing_idx": crossing_idx,
+        "sequence": sequence,
+    }
+
+
+@pytest.mark.slow
+class TestT23CrossingEndToEnd:
+    """The T23 half-integer crossing, exercised with real float32 arithmetic."""
+
+    def test_crossing_position_verified(self, t23_crossing_fixture):
+        """Guard: the fixture really has a half-integer -> integer transition."""
+        info = t23_crossing_fixture
+        c = info["crossing_idx"]
+        f32 = info["f32_cumsum"]
+
+        # Value before the crossing is exactly T23 - 0.5
+        assert float(f32[c - 1]) == float(np.float32(T23 - 0.5))
+        # Value at the crossing is exactly T23
+        assert float(f32[c]) == float(np.float32(T23))
+        # find_t23_crossing returns the correct index
+        assert find_t23_crossing(f32, info["n_prefix"]) == c
+
+    def test_damaged_gc_differs_at_crossing_fragment(self, t23_crossing_fixture):
+        """The float32 bug causes a GC change at the crossing fragment."""
+        info = t23_crossing_fixture
+        # Fragment A (index 2): spans crossing, no N — GC should differ
+        assert info["damaged_gc"][2] != info["oracle_gc"][2], (
+            f"damaged={info['damaged_gc'][2]}, oracle={info['oracle_gc'][2]}"
+        )
+        # Fragment B (index 3): past crossing, no N — GC should agree
+        assert info["damaged_gc"][3] == info["oracle_gc"][3], (
+            f"damaged={info['damaged_gc'][3]}, oracle={info['oracle_gc'][3]}"
+        )
+        # Fragment D (index 0): below T23 — GC should agree
+        assert info["damaged_gc"][0] == info["oracle_gc"][0]
+
+    def test_classify_allows_crossing_span(self, t23_crossing_fixture):
+        """classify_gc_changes permits the N-free crossing change."""
+        info = t23_crossing_fixture
+        stats, violations = classify_gc_changes(
+            info["damaged_gc"], info["oracle_gc"],
+            info["starts"], info["lengths"],
+            info["f32_cumsum"], info["n_prefix"],
+        )
+        assert violations == [], f"Unexpected violations: {violations}"
+        assert stats["changed_between_T23_T24_t23_crossing"] >= 1
+        assert stats["changed_between_T23_T24_no_N"] == 0
+        assert stats["changed_below_T23"] == 0
 
 
 # ---------------------------------------------------------------------------

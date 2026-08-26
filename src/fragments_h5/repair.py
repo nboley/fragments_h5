@@ -462,6 +462,40 @@ def build_n_prefix_sum(float64_cumsum):
     return prefix
 
 
+def find_t23_crossing(f32_cumsum, n_prefix):
+    """Find the unique cumsum index where the float32 accumulator enters [T23, T24)
+    from a half-integer via a G/C (+1.0) step, producing a rounding error.
+
+    Below T23, float32 represents half-integers exactly. If the accumulator arrives
+    at T23 - 0.5 = 8,388,607.5 and the next base is G/C (+1.0), the result
+    8,388,608.5 is not representable in [T23, T24) (only integers are exact), so it
+    rounds to 8,388,608.0 — a -0.5 error on a non-N base. This is the one position
+    per contig (at most) where a GC change can occur in the middle band on an N-free
+    span.
+
+    Returns the crossing cumsum index, or None if no such crossing exists (contig too
+    short to reach T23, or the boundary was crossed from an integer or via an N step).
+    """
+    above = f32_cumsum >= numpy.float32(T23)
+    if not numpy.any(above):
+        return None
+
+    crossing_idx = int(numpy.argmax(above))
+    if crossing_idx == 0:
+        return None
+
+    # Was the accumulator at a half-integer just before the transition?
+    val_before = float(f32_cumsum[crossing_idx - 1])
+    if val_before % 1.0 != 0.5:
+        return None  # entered from an integer; +1.0 is exact
+
+    # Was the step a G/C (+1.0), not an N (+0.5)?
+    if (n_prefix[crossing_idx] - n_prefix[crossing_idx - 1]) > 0:
+        return None  # N step from half-integer to integer is exact
+
+    return crossing_idx
+
+
 def classify_gc_changes(old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix):
     """Classify and validate GC changes per §5b's region rules.
 
@@ -491,6 +525,7 @@ def classify_gc_changes(old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix):
         "changed_below_T23": 0,
         "changed_between_T23_T24": 0,
         "changed_between_T23_T24_no_N": 0,
+        "changed_between_T23_T24_t23_crossing": 0,
         "changed_above_T24": 0,
         "zero_to_nonzero": int(numpy.sum((old_gc == 0) & (new_gc != 0) & changed)),
         "nonzero_to_nonzero": int(numpy.sum((old_gc != 0) & (new_gc != 0) & changed)),
@@ -516,21 +551,30 @@ def classify_gc_changes(old_gc, new_gc, starts, lengths, f32_cumsum, n_prefix):
             f"{stats['changed_below_T23']} changes in pre-saturation region (< T23) — abort"
         )
 
-    # Region: between T23 and T24 — change only if span contains N
+    # Region: between T23 and T24 — change permitted if span contains N or
+    # spans the T23 half-integer crossing (§4.2 Consequence 5, corrected).
     changed_middle = changed & between_t23_t24
     stats["changed_between_T23_T24"] = int(numpy.sum(changed_middle))
     if stats["changed_between_T23_T24"] > 0:
-        # Check which of these DON'T contain an N
+        t23_crossing = find_t23_crossing(f32_cumsum, n_prefix)
+
         middle_changed_idx = numpy.where(changed_middle)[0]
         for idx in middle_changed_idx:
             s, e = int(starts[idx]), int(stops[idx])
             has_n = (n_prefix[e] - n_prefix[s]) > 0
             if not has_n:
-                stats["changed_between_T23_T24_no_N"] += 1
+                spans_crossing = (
+                    t23_crossing is not None
+                    and s < t23_crossing <= e
+                )
+                if spans_crossing:
+                    stats["changed_between_T23_T24_t23_crossing"] += 1
+                else:
+                    stats["changed_between_T23_T24_no_N"] += 1
         if stats["changed_between_T23_T24_no_N"] > 0:
             violations.append(
                 f"{stats['changed_between_T23_T24_no_N']} middle-band changes on N-free "
-                f"spans — abort"
+                f"spans not spanning the T23 crossing — abort"
             )
 
     # Region: above T24 — change freely
