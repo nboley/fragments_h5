@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
-**Last Updated:** 2026-08-21
-**Version:** 2.11.0
+**Last Updated:** 2026-08-25
+**Version:** 2.12.1
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -20,7 +20,7 @@
 - tqdm progress bar during build (weighted by contig length)
 - S3/GS/HTTP streaming support for BAM and FASTA files (any htslib-supported scheme)
 - Optional metadata: GC content, strand, mapping quality, methylation, fragment clipping status
-- Build provenance: `_build_argv` (CLI invocations) and `_build_version` recorded in the h5
+- Build provenance: `_build_argv` (CLI invocations) and `_build_code_revision` (self-labeling revision string) recorded in the h5. `_build_version` is read-only (no longer written to new files)
 
 **Target Use Cases:**
 - Cell-free DNA analysis and fragmentomics research
@@ -31,7 +31,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.11.0
+- **Version:** 2.12.1
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
@@ -59,7 +59,8 @@
 │   ├── _source_format            [str, "BAM" or "TSV"]
 │   ├── _contig_lengths_str       [str, Python dict literal]
 │   ├── _build_argv               [str, JSON array] (optional, CLI builds only)
-│   └── _build_version            [str] (optional, absent if package not installed)
+│   ├── _build_code_revision      [str] (optional, self-labeling: "git:...", "baked:...", "dist:...", "dist-editable:...")
+│   └── _build_version            [str] (legacy, read-only; written only by 2.12.0/2.12.1, no longer written to new files)
 ├── data/
 │   └── {contig}/
 │       ├── starts          [int32, sorted]
@@ -122,12 +123,41 @@ Optimization: Use block index to reduce searchsorted range
 
 **Worker Workflow:**
 ```python
-def build_sub_fragments_h5(args):
-    # args = (bam_path, contig, chunk_start, chunk_stop, contig_length, ...)
+@dataclass(frozen=True, slots=True)
+class SubBuildArgs:
+    input_fname: str
+    bam_contig: str
+    output_contig: str
+    chunk_start: int
+    chunk_stop: int
+    contig_length: int
+    fasta_filename: Optional[str]
+    single_end: bool
+    se_max_fragment_length: Optional[int]
+    read_gc: bool
+    read_strand: bool
+    read_methyl: bool
+    set_mapq_255_to_none: bool
+    include_duplicates: bool
+    store_fragment_end_clipped: bool
+    tmp_dir_name: str
+    min_mapq: Optional[int]
+
+def build_sub_fragments_h5(args: SubBuildArgs):
     # Worker fetches BAM region [chunk_start, chunk_stop) and filters fragments by start position
     # FASTA fetched for region [chunk_start, chunk_stop + MAX_FRAG_LENGTH) for GC calculation
-    # Returns (contig, chunk_start, chunk_stop, temp_h5_path)
+    # Returns (output_contig, chunk_start, chunk_stop, temp_h5_path_or_None)
 ```
+
+**`SubBuildArgs` (added in the worker-args refactor, `9430e40`):** replaces a 17-element
+positional tuple that shipped a released defect (see changelog below and
+`docs/architecture/worker_args_refactor.md`). Constructed with keywords only at the single
+pack site inside `build_fragments_h5`'s contig × chunk loop; unpacked via 17 one-to-one
+`args.<field>` rebinds at the top of `build_sub_fragments_h5`. `args[i]`-style access now
+raises `TypeError: 'SubBuildArgs' object is not subscriptable` — the class of bug that broke
+every build in the deleted `v2.10.1` tag is structurally unreachable. The 4-element return
+tuple above is a separate, still-positional shape, deliberately out of scope for that refactor
+(no defect history, unpacked immediately at both consumers).
 
 ---
 
@@ -162,7 +192,8 @@ fragments_h5/
 │   └── conda_build_config.yaml
 ├── docs/
 │   ├── architecture/
-│   │   └── fragment_selection_and_build_provenance.md
+│   │   ├── fragment_selection_and_build_provenance.md
+│   │   └── build_version_provenance_correctness.md
 │   └── plan_chunk_based_parallelization.md
 ├── pyproject.toml              # pip package metadata
 ├── setup.py                    # Cython extension build
@@ -200,7 +231,7 @@ class FragmentsH5:
     # Properties: filename, name, has_methyl, has_strand,
     #            has_fragment_end_clipped, max_fragment_length,
     #            fragment_length_counts, n_fragments,
-    #            build_argv, build_version, source_format
+    #            build_argv, build_version, build_code_revision, source_format
 ```
 
 **Build Functions:**
@@ -214,8 +245,9 @@ def build_fragments_h5(input_fname, ofname, fasta_filename=None,
                       *, build_argv=None):
     """Main entry point for building fragment H5 from BAM or TSV/BED"""
 
-def build_sub_fragments_h5(args):
-    """Worker function — processes one chunk (contig, chunk_start, chunk_stop)"""
+def build_sub_fragments_h5(args: SubBuildArgs):
+    """Worker function — processes one chunk (contig, chunk_start, chunk_stop).
+    `args` is a module-scope `SubBuildArgs` dataclass (§2.3), not a positional tuple."""
 ```
 
 #### `fragment.py` (Data Classes and BAM Parsing)
@@ -389,13 +421,14 @@ make docker
 
 | Target | Description |
 |--------|-------------|
-| `conda-build` | Build conda package with rattler-build |
+| `require-clean-tree` | Whole-tree cleanliness gate (tracked + untracked); prerequisite of `conda-build`, `docker-build`, `tag` |
+| `conda-build` | Build conda package with rattler-build (requires clean tree) |
 | `conda-publish` | Upload to JFrog Artifactory (requires credentials) |
 | `conda` | Build + publish conda |
-| `docker-build` | Build Docker image |
+| `docker-build` | Build Docker image (requires clean tree; bakes `git describe` via `--build-arg`) |
 | `docker-push` | Push to GHCR (requires gh auth) |
 | `docker` | Build + push Docker |
-| `tag` | Create and push git tag v$(VERSION) |
+| `tag` | Create and push git tag v$(VERSION) (requires clean tree + uncommitted pyproject.toml check) |
 | `all` | conda + docker + tag + clean |
 | `clean` | Remove build artifacts |
 
@@ -631,8 +664,9 @@ print(fh5.has_strand)
 print(fh5.has_methyl)
 
 # Build provenance (None for files built before this feature)
-print(fh5.build_argv)      # list of CLI args, or None
-print(fh5.build_version)   # package version string, or None
+print(fh5.build_argv)            # list of CLI args, or None
+print(fh5.build_code_revision)   # self-labeling revision string (e.g. "git:v2.12.1-2-g704a630"), or None
+print(fh5.build_version)         # package version string, or None (legacy; no longer written to new files)
 ```
 
 **Build Programmatically:**
@@ -653,7 +687,7 @@ build_fragments_h5(
     include_duplicates=False,
     store_fragment_end_clipped=True,
     min_mapq=30,
-    # build_argv is keyword-only; omit for library callers (records _build_version only)
+    # build_argv is keyword-only; omit for library callers (records _build_code_revision only)
     # CLI passes build_argv=sys.argv automatically
 )
 ```
@@ -1103,12 +1137,39 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 
 ---
 
+### Unreleased (worker-args-refactor branch, merged `9430e40`)
+- **`SubBuildArgs` replaces the 17-element positional worker-args tuple:** `build_sub_fragments_h5`
+  now takes a module-scope `@dataclass(frozen=True, slots=True)`, constructed with keywords only
+  at the pack site in `build_fragments_h5`. Motivation: the positional tuple shipped a total
+  failure in the (since-deleted) `v2.10.1` tag — inserting `output_contig` at index 2 left a
+  *third*, derived reader (`total_bases = sum(a[3] - a[2] for a in args)`, ~370 lines from the
+  pack/unpack sites) computing `chunk_start - output_contig` (`int - str`), raising `TypeError`
+  on every build at `num_processes` 1, 2, and 4. Pack and unpack were kept in sync at every
+  historical insertion; this third accessor was not. Under `SubBuildArgs`, `args[i]` raises
+  `TypeError: 'SubBuildArgs' object is not subscriptable` — the defect class is now structurally
+  unreachable, not merely absent. See `docs/architecture/worker_args_refactor.md`.
+- **`--contig-name-map` test coverage:** went from zero test references to seven
+  (`tests/test_contig_name_map.py`), including the multiprocessing path — the flag that makes
+  `output_contig` differ from `bam_contig`, the exact field whose insertion caused the defect
+  above.
+- **`target_h5_path` test fixture** now invokes `sys.executable -m fragments_h5.main` instead of
+  a bare `build-fragments-h5` under `shell=True`. Six CLI integration tests had been erroring at
+  setup (exit 127) whenever pytest was launched by absolute interpreter path.
+- **Known and accepted, not defects:** keyword construction removes *ordering* errors but not
+  wrong-*value* binding — six adjacent booleans (`read_gc`, `read_strand`, `read_methyl`,
+  `set_mapq_255_to_none`, `include_duplicates`, `store_fragment_end_clipped`) remain mutually
+  substitutable. 8 of the 17 fields are per-build invariants resent with every chunk; only 4 vary
+  per task — an invariant/config split would address it and is deliberately deferred.
+  `max_tlen=1000` in `single_end_bam_to_fragments` (`fragment.py:559`) is dead in the function
+  body but must not be removed: a shared call passes it unconditionally, and removing it raises
+  `TypeError` on every single-end build.
+
 ### Unreleased (fragment-selection-and-provenance branch)
 - **Secondary alignment exclusion:** `is_secondary` now excluded in both paired-end (`bam_to_align`) and single-end (`single_end_bam_to_fragments`) filters. Unconditional, no flag. Measured impact on current data: zero (0 secondary alignments in ~61k sampled reads across fixtures and two production BAMs, because `bwa-mem2`/`bowtie2` are not given `-a`/`-k`). If an aligner config ever gains `-a`/`-k`, this becomes material.
 - **SE over-length span raises `ValueError`:** When `se_max_fragment_length` is unset, a single-end read whose reference span exceeds 65535 now raises `ValueError` with contig, position, read name, and CIGAR — instead of an opaque `OverflowError` from inside a multiprocessing worker. When `se_max_fragment_length` is set, over-long spans are still silently skipped.
 - **`num_mapped` fix:** `num_mapped_alignments` (formerly `num_mapped`) no longer halves the alignment count with `// 2`. A single-end contig with exactly one mapped read is no longer silently dropped.
 - **S3 input fix:** `os.path.abspath` was mangling `s3://b/k.bam` into `/cwd/s3:/b/k.bam`. Remote URLs are now detected by a generic scheme regex and left untouched. Also covers `gs://`, `https://`, `ftp://`, etc.
-- **Build provenance:** New h5 attributes `_build_argv` (JSON array, CLI builds only) and `_build_version` (package version string). Exposed as `FragmentsH5.build_argv` and `FragmentsH5.build_version`. Both return `None` on files that predate this feature. `build_argv` is keyword-only in `build_fragments_h5()`; library callers get `_build_version` only.
+- **Build provenance:** New h5 attributes `_build_argv` (JSON array, CLI builds only) and `_build_code_revision` (self-labeling revision string). Exposed as `FragmentsH5.build_argv`, `FragmentsH5.build_code_revision`, and `FragmentsH5.build_version` (legacy read-only). `_build_version` is no longer written to new files; `build_version` returns `None` except for files built by 2.12.0/2.12.1. `build_argv` is keyword-only in `build_fragments_h5()`; library callers get `_build_code_revision` only.
 - **`numpy>=1.24` floor:** Added to `pyproject.toml` dependencies. Ensures out-of-range uint16 assignment always raises, closing the last environment-dependent failure mode.
 
 ### v2.11.0 Changelog
@@ -1141,6 +1202,6 @@ was the right fix.
 - **Single-process optimization:** When num_processes=1, work runs in-process without forking.
 - **Bug fix:** `contig_lengths` computation with `--contigs` filter was pairing contig names with wrong lengths.
 
-**Document Version:** 1.3
-**Last Updated:** 2026-08-21
+**Document Version:** 1.5
+**Last Updated:** 2026-08-25
 **Generated for:** Debugging and development assistance

@@ -13,7 +13,7 @@ This guide explains how to build and push Docker images and packages after makin
 
 ## Current Version
 
-The version is automatically read from `pyproject.toml` (currently **2.11.0**).
+The version is automatically read from `pyproject.toml` (currently **2.12.1**).
 
 ## Changelog
 
@@ -28,11 +28,12 @@ The version is automatically read from `pyproject.toml` (currently **2.11.0**).
 - CLI validation: range checks, mutual requirement of `--single-end` and
   `--se-max-fragment-length` (BAM only).
 - First CLI-level tests; mutation-verified coverage for the SE filter gate.
-- Build provenance: `_build_argv` and `_build_version` h5 attributes record CLI
-  arguments (JSON) and the installed package version. Exposed as
-  `FragmentsH5.build_argv` and `.build_version`; both return `None` for files
-  built before this feature. `build_argv` is recorded only for CLI builds —
-  library callers get `_build_version` only.
+- Build provenance: `_build_argv` and `_build_code_revision` h5 attributes record
+  CLI arguments (JSON) and a self-labeling code revision string. Exposed as
+  `FragmentsH5.build_argv`, `.build_code_revision`, and `.build_version` (legacy
+  read-only). `_build_version` is no longer written to new files (see note below);
+  `build_argv` is recorded only for CLI builds — library callers get
+  `_build_code_revision` only.
 - `numpy>=1.24` dependency floor in `pyproject.toml`, ensuring out-of-range
   uint16 assignment always raises (closes environment-dependent failure mode).
 
@@ -89,6 +90,53 @@ unaffected by the tag's removal; with the tag gone, this note is the only
 remaining git-side anchor for that artifact. The tag was deleted because a label
 that points at unbuildable source is worse than no label — but the information it
 implied is preserved here rather than destroyed.
+
+**Worker-args refactor: `SubBuildArgs` replaces the positional tuple (2026-08-25, branch
+`worker-args-refactor`, merged `9430e40`).** `build_sub_fragments_h5` took a single positional
+17-element tuple; it now takes a module-scope `@dataclass(frozen=True, slots=True)`,
+`SubBuildArgs`, constructed with keyword arguments. Motivation: the tuple shipped a total
+failure in the (deleted, see above) `v2.10.1` tag — inserting `output_contig` at index 2 was
+correctly reflected at the pack and unpack sites, but not at a *third*, derived reader,
+`total_bases = sum(a[3] - a[2] for a in args)`, ~370 lines away, which then computed
+`chunk_start - output_contig` (`int - str`), raising `TypeError` on every build at
+`num_processes` 1, 2, and 4. Restoring positional access now raises
+`TypeError: 'SubBuildArgs' object is not subscriptable` — the defect class is structurally
+unreachable, not merely absent. Shipped alongside: `--contig-name-map` test coverage (zero to
+seven tests, including the multiprocessing path — it is the flag that makes `output_contig`
+differ from `bam_contig`, the exact field whose insertion caused the defect); and the
+`target_h5_path` CLI fixture switched from a bare `build-fragments-h5` under `shell=True` to
+`sys.executable -m fragments_h5.main`, fixing six tests that had been silently erroring (exit
+127) whenever pytest was launched by absolute interpreter path. Known and accepted, not
+defects: keyword construction removes ordering errors but not wrong-value binding between six
+adjacent booleans; 8 of the 17 fields are per-build invariants resent with every chunk (an
+invariant/config split is deferred); `max_tlen=1000` in `single_end_bam_to_fragments` is dead
+in the body but must not be removed (a shared call passes it unconditionally). No version bump
+— internal-only change, no external callers. See `docs/architecture/worker_args_refactor.md`.
+This changelog entry completes a documentation gate that was missed when `9430e40` merged; it
+lands here, on `build-revision-provenance`, because that branch already edits this file and the
+gap was found while doing so.
+
+**`_build_version` no longer written (2026-08-25).** Decided by the user
+after an EM critical review of the 2.12.0/2.12.1 build-provenance work above.
+`_build_version` (from installed dist-info) and `_build_code_revision` (from
+`git describe`, primarily) could disagree — measured on this machine, a
+locally built h5 carried a stale `_build_version` next to a correct
+`_build_code_revision`. `_build_code_revision` is now the sole authoritative
+field for code identity; `_build_version` is retained read-only
+(`FragmentsH5.build_version`) for backward compatibility with files written
+by 2.12.0 and 2.12.1, but is no longer written to new files. No format
+version bump. See
+`docs/architecture/fragment_selection_and_build_provenance.md`'s 2026-08-25
+addendum for the full rationale.
+
+**`require-clean-tree` guards all artifact-producing targets (2026-08-25).**
+`conda-build`, `docker-build`, and `tag` now all depend on a shared
+`require-clean-tree` Makefile prerequisite. It refuses to proceed when the
+working tree has tracked changes (staged or unstaged) or untracked files.
+`tag` additionally keeps its `check-pyproject-clean` prerequisite (ordered
+first for a tailored diagnostic). This closes the asymmetry where some
+artifact types were gated and others were not — the root cause of the
+v2.10.1 image/tag mismatch.
 
 ### v2.7.0 (2026-02-11)
 
@@ -207,5 +255,5 @@ evidence — confirm what a container contains by running it.
 ## Troubleshooting
 
 - **Docker push fails**: Ensure `gh auth login` is completed
-- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and the `tag` target refuses to tag when `pyproject.toml` is uncommitted. However, `docker-build` has no such check, so a Docker image *can* be built from a dirty tree with a stale version. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
+- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and all artifact-producing targets (`conda-build`, `docker-build`, `tag`) depend on `require-clean-tree`, which refuses to proceed when the working tree has tracked or untracked changes. `tag` additionally has a `check-pyproject-clean` prerequisite with a tailored diagnostic. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
 - **Conda build fails**: Ensure conda-forge and bioconda channels are available

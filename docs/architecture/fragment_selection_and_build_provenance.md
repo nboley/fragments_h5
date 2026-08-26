@@ -522,7 +522,7 @@ the two missing pieces.
 | Attribute | Type | Written when | Content |
 |---|---|---|---|
 | `_build_argv` | `str` (JSON array of strings) | only when the caller supplies argv | `json.dumps(sys.argv)` as captured in `main.py` |
-| `_build_version` | `str` | always, when determinable | `importlib.metadata.version("fragments-h5")` |
+| `_build_version` | `str` | **no longer written** as of the Addendum below; only read, for files written by 2.12.0/2.12.1 | `importlib.metadata.version("fragments-h5")` |
 
 Written in the file-creation block alongside the existing five attributes
 (`fragments_h5.py:1147-1151`). Attributes, not datasets, matching the house rule
@@ -622,10 +622,12 @@ matching `pyproject.toml:7`. But an editable install with stale metadata reports
 stale version — this exact repo previously had dist-info reporting 2.9.1 while
 the tree said 2.11.0. So `_build_version` pins the *installed distribution*,
 which is exactly right for containers and can mislead in a dev checkout. Related:
-the `Makefile` `docker-build` target does **not** check tree cleanliness even
-though `tag` does, so `RELEASE.md:148`'s claim that a version mismatch is "not
-possible" is false — a container can be built from a dirty tree, and
-`_build_version` would then not fully identify the code. Not fixed here; noted.
+all artifact-producing `Makefile` targets (`conda-build`, `docker-build`, `tag`)
+now depend on a shared `require-clean-tree` prerequisite, which refuses to
+proceed when the working tree has tracked changes (staged or unstaged) or
+untracked files. `tag` additionally has a `check-pyproject-clean` prerequisite
+(ordered first, for a tailored diagnostic). This closes the gap that previously
+let artifacts be built from a dirty tree with a stale version.
 
 If `importlib.metadata.PackageNotFoundError` is raised (uninstalled tree), omit
 the attribute rather than writing a sentinel like `"unknown"`. Absent means
@@ -633,6 +635,59 @@ unknown; there is no second thing to disambiguate.
 
 **No new worker-tuple element** — provenance is written in the main process at
 file creation.
+
+*(2026-08-25: the paragraphs above describe 2.12.0/2.12.1 behavior. As of the
+Addendum immediately below, `_build_version` is no longer written at all, so
+the staleness problem they describe cannot recur for new files — there is
+nothing to go stale.)*
+
+### Addendum (2026-08-25): stop writing `_build_version`
+
+**Decided by the user, after an EM critical review.** `_build_version` and
+`_build_code_revision` can disagree, and did: a file built locally on this
+machine carried `_build_version='2.11.0'` (stale — `importlib.metadata`
+reads installed dist-info, which had not been reinstalled) right next to
+`_build_code_revision='git:v2.12.1-11-g0f787af'` (correct, since its primary
+resolution path is `git describe` against the working tree, not dist-info).
+Two provenance fields disagreeing, and the one named "version" — the more
+authoritative-sounding name — was the less trustworthy one.
+
+**Change: keep reading, stop writing.** The `try/except PackageNotFoundError`
+write block described above is removed from the file-creation block.
+`FragmentsH5.__init__`'s `.attrs.get("_build_version")` read and the
+`build_version` accessor are unchanged, so files written by 2.12.0 and 2.12.1
+(which did write the attribute) still expose it through `.build_version`.
+Newly built files simply return `None`.
+
+**`_build_code_revision` is now the sole authoritative field for code
+identity.** See "Code revision is library-side, unlike argv" below — it
+already existed alongside `_build_version` and does not share its
+staleness failure mode.
+
+**No format version bump**, consistent with the rest of this document:
+`.get()` already makes the attribute's absence unremarkable — true for
+pre-2.12.0 files before this change, and now also true for post-2.12.1 files
+built after it, for the same reason.
+
+**Supersedes part of "Known limitation: derived h5s drop provenance" below.**
+`_build_version` presence no longer discriminates "built by >= 2.12.0" from
+anything, because 2.12.2+ never writes it either — only 2.12.0 and 2.12.1
+did. `_build_code_revision` presence/format remains the discriminating
+signal going forward.
+
+### Code revision is library-side, unlike argv
+
+`_build_code_revision` is determined in `fragments_h5.py` via
+`_resolve_build_code_revision()`, not at the CLI boundary. This is a deliberate
+departure from `_build_argv`, which is passed in from `main.py`. The reasoning:
+argv is a property of the *invocation*, known only to the CLI entry point, while
+code revision is a property of the *installed package*, derivable from
+`__file__`. Placing it in the library means the ~30 library and test callers of
+`build_fragments_h5()` also get a revision stamp, rather than only CLI builds.
+
+The resolver returns a self-labeling string with one of four prefixes (`git:`,
+`baked:`, `dist:`, `dist-editable:`) or `None`. The prefix names both the value
+and the oracle that produced it, so consumers know what guarantee applies.
 
 ### Worker-args tuple: nothing is added
 
@@ -741,9 +796,12 @@ derived h5 may carry no provenance while looking like a normal file.
 **Is absence-of-provenance distinguishable from built-before-this-change?**
 Partially, and the design does not pretend otherwise:
 
-- `_build_version` present -> built by >= 2.12.0 from an installed distribution.
+- `_build_version` present -> built by 2.12.0 or 2.12.1 from an installed
+  distribution. (Per the 2026-08-25 Addendum above, this is now a closed,
+  two-version range, not "any version >= 2.12.0" — 2.12.2+ never writes it.)
 - `_build_version` absent -> pre-2.12.0, **or** built from an uninstalled tree,
-  **or** derived by one of the two allowlist scripts above.
+  **or** derived by one of the two allowlist scripts above, **or** built by
+  2.12.2+ (which never writes it regardless of install state).
 
 Those three are not distinguishable from the file alone. Adding a sentinel or a
 format version to disambiguate them was considered and rejected (below): it buys
@@ -812,7 +870,7 @@ patching. Anchor on the quoted code, not the number, from step two onward.
   `bam_to_fragments` has no `**kwargs`, which invites the wrong conclusion about
   the third branch.
 - `:916-934` add keyword-only `build_argv=None`
-- `:1147-1151` write `_build_argv` (when provided) and `_build_version`
+- `:1147-1151` write `_build_argv` (when provided) and `_build_code_revision` (when resolver returns non-`None`; `_build_version` no longer written per Addendum)
 - `:288-304` read both back via `.attrs.get()`
 
 `src/fragments_h5/main.py`
@@ -875,8 +933,8 @@ in `tests/`; keep fixtures local to each module, matching the existing layout.
 **`tests/test_build_provenance.py` (new)**
 
 - `test_provenance_absent_for_library_caller` — direct `build_fragments_h5(...)`.
-  Assert `_build_argv` not in `f.attrs` and `_build_version` equals
-  `importlib.metadata.version("fragments-h5")`.
+  Assert `_build_argv` not in `f.attrs` and `_build_version` not in `f.attrs`
+  (no longer written per Addendum; originally asserted equality with installed version).
 - `test_provenance_recorded_when_argv_passed` — pass an explicit
   `build_argv=['build-fragments-h5', 'in.bam', 'out.h5', '--single-end']`.
   Assert `json.loads(f.attrs['_build_argv'])` round-trips exactly, including

@@ -20,7 +20,7 @@ VERSION ?= $(shell grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)
 IMAGE_NAME = fragments-h5
 GHCR_IMAGE = ghcr.io/$(GITHUB_USER)/$(IMAGE_NAME)
 
-.PHONY: all login conda-login docker-login conda-build conda-publish conda docker-build docker-push docker tag clean help
+.PHONY: all login conda-login docker-login require-clean-tree check-pyproject-clean conda-build conda-publish conda docker-build docker-push docker tag clean help
 
 help:
 	@echo "Usage: make [target]"
@@ -70,7 +70,24 @@ login: conda-login docker-login
 	@echo "✓ All credentials verified successfully!"
 	@echo ""
 
-conda-build:
+require-clean-tree:
+	@# Whole-tree cleanliness gate for anything that produces a distributable
+	@# artifact (git tag, conda package, Docker image). Tracked changes
+	@# (staged or unstaged) and untracked files all disqualify. This is what
+	@# prevents an artifact from disagreeing with the commit it claims to be
+	@# built from -- the root cause of the v2.10.1 image/tag mismatch.
+	@if ! git diff --quiet HEAD; then \
+		echo "Error: working tree has uncommitted changes; refusing to proceed."; \
+		echo "  Commit or stash your changes first."; \
+		exit 1; \
+	fi
+	@if [ -n "$$(git ls-files --others --exclude-standard)" ]; then \
+		echo "Error: working tree has untracked files; refusing to proceed."; \
+		echo "  Add them to .gitignore or remove them first."; \
+		exit 1; \
+	fi
+
+conda-build: require-clean-tree
 	@echo "Building conda package with rattler-build..."
 	@rattler-build build \
 		--recipe conda-recipe/recipe.yaml \
@@ -91,9 +108,11 @@ conda-build:
 conda: conda-build
 	@echo "Conda package built successfully!"
 
-docker-build:
+docker-build: require-clean-tree
 	@echo "Building Docker image $(IMAGE_NAME):$(VERSION)..."
-	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+	docker build \
+		--build-arg BUILD_CODE_REVISION="$$(git describe --tags --always --dirty)" \
+		-t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
 	@echo "Docker image built: $(IMAGE_NAME):$(VERSION)"
 
 docker-push: docker-build
@@ -111,16 +130,21 @@ docker-push: docker-build
 docker: docker-build docker-push
 	@echo "Docker image built and pushed successfully!"
 
-tag:
+check-pyproject-clean:
 	@# VERSION is read from the WORKING TREE. If pyproject.toml is uncommitted,
 	@# the tag would point at HEAD, which declares a different version. This is
 	@# how v2.10.1 came to point at a commit whose pyproject.toml said 2.10.0.
+	@# This check runs before the whole-tree require-clean-tree gate so that,
+	@# in the common case (only pyproject.toml is dirty), the error explains
+	@# *why* that specifically matters for tagging rather than just refusing.
 	@if ! git diff --quiet HEAD -- pyproject.toml; then \
 		echo "Error: pyproject.toml has uncommitted changes; refusing to tag."; \
 		echo "  Working tree declares $(VERSION), but the tag would point at HEAD,"; \
 		echo "  which declares something else. Commit the version bump first."; \
 		exit 1; \
 	fi
+
+tag: check-pyproject-clean require-clean-tree
 	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
 		echo "Error: Tag v$(VERSION) already exists"; \
 		echo "  Bump the version in pyproject.toml first."; \

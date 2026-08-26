@@ -4,7 +4,7 @@ main.py:145-159).
 Coverage before this file: ZERO (confirmed by grep). This is the flag that makes
 output_contig != bam_contig, which is exactly the field whose insertion into the
 17-element worker-args tuple shipped a released TypeError (v2.10.1, see
-docs/pending/worker_args_refactor.md and CLAUDE memory). Every assertion here is
+docs/architecture/worker_args_refactor.md and CLAUDE memory). Every assertion here is
 written to distinguish a MAPPED output name/value from an UNMAPPED one -- a test
 that would pass whether or not the rename happened is worthless for that purpose.
 """

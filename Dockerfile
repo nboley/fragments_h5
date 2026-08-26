@@ -13,7 +13,12 @@ COPY --chown=$MAMBA_USER:$MAMBA_USER . /tmp/fragments_h5
 WORKDIR /tmp/fragments_h5
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
-RUN python setup.py build_ext --inplace && \
+ARG BUILD_CODE_REVISION=""
+RUN if [ -n "$BUILD_CODE_REVISION" ]; then \
+        printf 'REVISION = "%s"\n' "$BUILD_CODE_REVISION" \
+            > src/fragments_h5/_build_revision.py; \
+    fi && \
+    python setup.py build_ext --inplace && \
     pip install --no-cache-dir --no-deps .
 
 # Remove build-time-only packages (but not pip which would remove python)

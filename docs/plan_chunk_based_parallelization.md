@@ -41,6 +41,13 @@ Each worker task becomes a tuple like:
 
 Replacing the current per-contig signature which has no start/stop.
 
+**Stale as of the worker-args refactor (2026-08-25, `9430e40`):** this shipped in v2.8.0 as a
+17-element positional tuple (final field order differs from the sketch above), which itself
+shipped a released defect in `v2.10.1` (see `RELEASE.md`). The worker task argument is now the
+`SubBuildArgs` dataclass, not a tuple — see `docs/architecture/worker_args_refactor.md`. The
+rest of this document (chunking/merge/testing strategy) describes the shipped design accurately
+and is unaffected.
+
 ### Temp File Naming
 
 Change from `tmp.fragment_h5.{contig}.h5` to `tmp.fragment_h5.{contig}.{chunk_start}.h5` to avoid collisions between chunks of the same contig.

@@ -1,6 +1,8 @@
 # Build version provenance: labelling which oracle `_build_code_revision` trusted
 
-Status: **proposal** (not implemented). Scope: `_build_version` only; `_build_argv` is correct and out of scope.
+Status: **implemented** (branch `build-revision-provenance`, commits `0f787af`..`bb6f0d9`).
+Scope: `_build_code_revision` resolver, `_build_version` removal, and clean-tree gate.
+`_build_argv` is correct and out of scope.
 Not related to `docs/pending/build_provenance_metadata.md`, which is REJECTED — do not extend that design.
 
 ## Problem
@@ -50,9 +52,21 @@ installs; it is the current state of the machine these releases were cut from.
 at *runtime* but fully available at *image-build* time, on the host, inside the repo (`Makefile:94-97` runs
 `docker build` from the checkout), so the revision can be **baked in** rather than resolved at runtime.
 
-## Recommendation
+## Recommendation (as originally approved)
 
-Keep `_build_version` exactly as is. Add one new flat attribute, `_build_code_revision` (accessor
+> Keep `_build_version` exactly as is.
+
+**Superseded (2026-08-25, commit `2d71995`).** The user decided after an EM critical review to
+stop writing `_build_version` entirely. A locally built h5 carried
+`_build_version='2.11.0'` (stale dist-info) right next to a correct
+`_build_code_revision='git:v2.12.1-11-g0f787af'` — two provenance fields disagreeing, where the
+one with the more authoritative-sounding name was the less trustworthy one. `_build_version` is
+now read-only: `FragmentsH5.build_version` still returns the value for files written by 2.12.0
+and 2.12.1, and returns `None` for newly built files. The reasoning below for *adding*
+`_build_code_revision` remains valid; only the recommendation to *also keep writing*
+`_build_version` is withdrawn.
+
+Add one new flat attribute, `_build_code_revision` (accessor
 `build_code_revision`) — *revision*, not *version*, so it cannot be confused with the adjacent, less
 trustworthy `_build_version`: a single **self-labeling** string naming both the value and its oracle.
 
@@ -103,19 +117,31 @@ applies, making a dirty build *labeled*, not reproducible.
 **not** transfer — argv is a property of the *invocation*, known only to the CLI, while code revision is a property
 of the *installed package*, derivable from `__file__`; at the CLI the ~30 library/test callers would get nothing.
 
-**Compatibility.** No format version bump — consistent with `fragment_selection_and_build_provenance.md:49-50`,
-`:715-716`, `:981-986`. 2.12.0/2.12.1 files keep `_build_version` unchanged and simply lack
-`_build_code_revision`, read as `None` via `.get()`.
+**Compatibility.** No format version bump — consistent with the provenance decisions in
+`fragment_selection_and_build_provenance.md`. 2.12.0/2.12.1 files carry `_build_version` but
+lack `_build_code_revision`; post-`2d71995` files carry `_build_code_revision` but lack
+`_build_version`. Both are read via `.attrs.get()`, so absence is unremarkable in either
+direction.
 
 **Container.** Runtime git is absent, but `make docker-build` runs on the host inside the checkout, so the
-`baked:` step closes the gap without un-ignoring `.git`. Separately, `Makefile:94-97` has no cleanliness check at
-all — likely the defect behind the 2.10.1 image/tag mismatch (unconfirmed); `Makefile:118`'s `tag` guard checks
-only `pyproject.toml`, so `docker-build` needs its own whole-tree check (step 5 below).
+`baked:` step closes the gap without un-ignoring `.git`.
+
+> **Original text (superseded 2026-08-25, commit `3eb4c59`).** This section said
+> "`Makefile:94-97` has no cleanliness check at all" and prescribed a whole-tree gate
+> on `docker-build` only. The gate was implemented first as a per-target check on
+> `docker-build` (commit `f054e6a`), then refactored into a shared `require-clean-tree`
+> prerequisite guarding `conda-build`, `docker-build`, and `tag` (commit `3eb4c59`).
+> The broader scope was a user decision: leaving `conda-build` unguarded would have
+> reproduced the exact asymmetry — one artifact type gated, another not — that caused
+> the original v2.10.1 incident. `tag` additionally keeps its narrower
+> `check-pyproject-clean` prerequisite ordered first, so the tailored diagnostic
+> ("`pyproject.toml` has uncommitted changes; refusing to tag") still fires when
+> relevant.
 
 **Priority** (lettered, to stay distinct from the numbered resolution order above): **A.** the whole-tree
-cleanliness gate on `docker-build` — highest value, lowest cost, and it directly addresses the motivating defect;
-**B.** baking `git describe` in via `--build-arg`; **C.** the resolver itself. Shipping **C** alone is acceptable;
-shipping **C** *instead of* **A** and **B** would be the wrong call.
+cleanliness gate on all artifact-producing targets — highest value, lowest cost, and it directly addresses the
+motivating defect;
+**B.** baking `git describe` in via `--build-arg`; **C.** the resolver itself. All three shipped.
 
 ## Rejected alternatives
 
@@ -149,9 +175,10 @@ Single phase; no ordering dependencies.
    but must never be the path a missing binary takes. The three calls together measure ~0.09s (7-run median
    0.0890s, range 0.0858-0.0947s; individually 0.0084 / 0.0681 / 0.0144s), once per built file — negligible.
 2. `fragments_h5.py`, the `try/except PackageNotFoundError` block that writes
-   `f.attrs["_build_version"] = importlib.metadata.version("fragments-h5")` — leave it untouched; append a
-   conditional write of `_build_code_revision` when the resolver returns non-`None`, mirroring the
-   `f.attrs["_build_argv"]` write immediately above it.
+   `f.attrs["_build_version"] = importlib.metadata.version("fragments-h5")` — **removed** (commit
+   `2d71995`; see "Recommendation" above). The original proposal said "leave it untouched"; that was
+   superseded. A conditional write of `_build_code_revision` when the resolver returns non-`None`
+   was added in its place, mirroring the `f.attrs["_build_argv"]` write immediately above it.
 3. `fragments_h5.py`, in `FragmentsH5.__init__`, the line
    `self.build_version = self._f.attrs.get("_build_version")` — append
    `self.build_code_revision = self._f.attrs.get("_build_code_revision")` immediately after it.
@@ -163,17 +190,21 @@ Single phase; no ordering dependencies.
    > earlier design here raised the identical finding. Symbol names do not rot.
 4. `docs/architecture/fragment_selection_and_build_provenance.md` §5 — add a short subsection recording that
    revision determination is deliberately library-side, unlike argv, with the reason above.
-5. `Makefile:94-97` / `Dockerfile:12-17` — in scope here: a `--build-arg` plus a generated module is bounded, not
-   a release-process redesign. This step also carries priority **A**, which no other step covers: before invoking
-   `docker build`, gate on a clean whole tree — `git diff --quiet HEAD` (tracked, staged and unstaged) **and** an
-   empty `git ls-files --others --exclude-standard` (untracked) — aborting otherwise. The release process itself
-   stays out of scope.
+5. `Makefile` / `Dockerfile` — in scope here: a `--build-arg` plus a generated module is bounded, not
+   a release-process redesign. This step also carries priority **A**, which no other step covers.
+
+   **As implemented (commits `f054e6a`, `3eb4c59`):** a shared `require-clean-tree` prerequisite
+   gates on `git diff --quiet HEAD` (tracked, staged and unstaged) **and** an empty
+   `git ls-files --others --exclude-standard` (untracked), aborting otherwise. It guards
+   `conda-build`, `docker-build`, and `tag` — broader than the original proposal, which
+   specified only `docker-build`. See the "Container" section above for the rationale.
 
 ## Testing
 
 Extend `tests/test_build_provenance.py` (currently 6 tests):
 
-- Prefix contract: build a file; assert `_build_version` is unchanged and `_build_code_revision` is either
+- Prefix contract: build a file; assert `_build_version` is **absent** (no longer written per commit `2d71995`;
+  the original proposal said "unchanged") and `_build_code_revision` is either
   **absent** (step 5 permits omission — sdist install, no git, no dist-info) or a `str` starting with one of
   `git:` / `baked:` / `dist:` / `dist-editable:`. As an unconditional key lookup it errors on that legal case.
 - `git:` branch: assert the prefix, skipping on **the gate itself** (`ls-files --error-unmatch <basename>` exiting
@@ -203,18 +234,34 @@ Extend `tests/test_build_provenance.py` (currently 6 tests):
   site `:1188-1191` is in the post-worker merge block, so the patch is not lost across a fork.
 - Old-file degradation: alongside `test_file_without_provenance_opens:94`, assert a file with
   `_build_code_revision` deleted opens and exposes `None` (empirically confirmed for the existing two attrs).
-- `test_package_not_found_omits_build_version:150` must still pass — the resolver must never raise. Fix while
-  nearby: its docstring cites `fragments_h5.py:1184-1185`/`:1182-1185` for the `except PackageNotFoundError`
-  branch, which actually sits at `:1190-1191` — pre-existing drift in the test file, not introduced here.
+- `test_package_not_found_omits_build_version` — **removed** (commit `2d71995`). It existed solely
+  to cover the `try/except PackageNotFoundError` write block, which was deleted in the same commit.
+  The broader property it tested (the resolver must not crash the build on `PackageNotFoundError`)
+  remains covered by `test_revision_total_failure_omits_attribute`.
 
-Baseline, re-measured for this doc (the previously-quoted count did not reconcile: 55 outcomes vs. 71 collected;
-the outcome also changed, from a historical `2 failed` to a measured `0 failed` — unexplained here, most likely a
-different tree or env, and worth pinning down before treating this baseline as a regression gate):
-`cd /tmp && /home/nathanboley/miniconda3/envs/biomarker_env/bin/python -m pytest /home/nathanboley/src/fragments_h5/tests -q`
-→ **`65 passed, 2 warnings, 6 errors in 287.65s (0:04:47)`** (65 + 6 = 71, reconciles). The 6 errors are
-`build-fragments-h5` exiting 127 (console script not on PATH — environment artifact, not a code defect). "No
-regression" means these counts plus the new tests passing; `tests/test_docker_build.py` has zero `def test_`
-functions — a standalone manual script, not a pytest suite — so it contributes nothing regardless.
+Baseline, measured on branch `build-revision-provenance` at `bb6f0d9` (all implementation and
+this design doc's corrections applied):
+→ **`92 passed, 2 warnings, 0 errors`**. The 6 CLI-script errors from the original baseline
+(console script not on PATH) were resolved by the implementation work. "No regression" means
+these counts hold; `tests/test_docker_build.py` has zero `def test_` functions — a standalone
+manual script, not a pytest suite — so it contributes nothing regardless.
+
+### Coverage gap found post-review (2026-08-25)
+
+A coverage gap was found *after* implementation review passed: replacing the
+`f.attrs["_build_code_revision"] = _code_rev` write with `pass` — leaving the
+`if _code_rev is not None:` guard intact — left all 17 provenance tests green. Every test either
+drove the resolver directly (the `test_revision_*_branch` tests) or asserted the `None` case
+(backward-compat tests for files lacking the attribute), and none pinned that a real
+`build_fragments_h5()` call actually writes the attribute to the output file.
+
+Closed in commit `bb6f0d9` by `test_revision_written_into_real_build`, which monkeypatches
+`_resolve_build_code_revision` to a fixed sentinel, runs a real build, and asserts the sentinel
+appears in the output file's attrs. The monkeypatch avoids a rotting `git:...` string (this
+project has been bitten by hardcoded references three times).
+
+This is the sixth such gap found on this project where a write-site mutation left the suite
+green. Every one was caught by mutation testing (manual or automated), not by reading the tests.
 
 ## Risks
 

@@ -152,6 +152,10 @@ dmypy.json
 # Cython: generated C from .pyx (built from source at install time)
 src/fragments_h5/sequence.c
 
+# Generated at Docker image build time by the Dockerfile; must never be
+# committed, or every subsequent build resolves to a frozen "baked:" revision.
+src/fragments_h5/_build_revision.py
+
 # Cython debug symbols
 cython_debug/
 
