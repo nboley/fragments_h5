@@ -10,6 +10,7 @@ dependencies = [
   "h5py",
   "pysam",
   "tqdm",
+  "boto3",
 ]
 requires-python = ">=3.10"
 authors = [
