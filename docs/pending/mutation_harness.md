@@ -1,6 +1,7 @@
 # Design: a repeatable mutation-testing harness
 
-**Status:** proposal, not implemented. **Verified against:** `main` @ `f9971d0` (2026-08-27).
+**Status:** proposal, not implemented. **Verified against:** `main` @ `f9971d0` (2026-08-27);
+the Cython-extension prerequisite (below) additionally re-verified against `main` @ `ad89735`.
 
 ## Problem
 
@@ -57,12 +58,39 @@ inside that linked worktree. This one decision resolves three of the six problem
    not a corrupted tracked file. This is a strictly stronger guarantee than "restore in a
    finally block," which a kill signal bypasses.
 2. **Concurrent sessions.** Each invocation gets its own path (`.mutation-tmp/<uuid8>/`,
-   repo-root-local, to be gitignored). Two simultaneous runs never touch the same files;
-   `git worktree add` with distinct paths does not conflict.
+   repo-root-local). Two simultaneous runs never touch the same files; `git worktree add`
+   with distinct paths does not conflict. **Adding `.mutation-tmp/` to `.gitignore` is an
+   implementation prerequisite, not cosmetic — it is not there today.** A killed run
+   leaves an untracked `.mutation-tmp/` directory behind, and `make require-clean-tree`
+   (which gates `make tag`, `make conda-build`, and `make docker-build`) fails any
+   untracked file via `git ls-files --others --exclude-standard` — verified against this
+   repo's `Makefile`. Without the gitignore entry, one killed mutation run silently blocks
+   the next release until someone works out why.
 3. **The exact false positive above stops being possible.** A linked worktree is a real git
    checkout (`git -C <worktree> ls-files` succeeds), unlike a `cp`. Verified live in a
    throwaway repo this session (see Worked example): the tracked-file gate passes in a
    worktree and fails in a plain copy, for the identical file.
+
+## Prerequisite: the compiled Cython extension
+
+`git worktree add` checks out tracked files only; `sequence*.so` is gitignored, so a fresh
+worktree has no compiled extension, and the import chain is universal —
+`fragments_h5/__init__.py` → `fragments_h5.py` → `fragment.py`'s `from fragments_h5.sequence
+import one_hot_encode_sequences` — so **every** test file fails at collection. Verified
+against a real worktree of this repo: `ERROR tests/test_build_provenance.py` /
+`Interrupted: 1 error during collection`, `ModuleNotFoundError: No module named
+'fragments_h5.sequence'`; copying `sequence*.so` from the main tree's `src/fragments_h5/`
+into the worktree's `src/fragments_h5/` before the baseline run fixes it (18 tests then
+collect). The harness must do this copy as a setup step.
+
+That reuse is only conditionally valid: a `.so` built from a different `sequence.pyx` is
+silently wrong — the harness would then pin mutations against compiled code that disagrees
+with the source, the exact class of error it exists to catch. The cheap check is mtimes:
+before creating the worktree, compare `sequence.pyx`'s mtime against its `.so`'s mtime in
+the *main* tree (older `.so` than `.pyx` means not rebuilt since the last edit). If `.pyx`
+is newer, hard-error and refuse to proceed — same fail-loud posture as the anchor guard —
+telling the caller to rebuild first. Warning and continuing would reintroduce the exact
+silent-wrongness this check exists to prevent.
 
 ## Mutation spec: content anchor, not line number, with a hard zero/multi guard
 
@@ -101,6 +129,11 @@ came from exactly this conflation. The harness must distinguish three outcomes, 
    test body, as opposed to a fixture) — pytest's failure/error split already rules out the
    collection-error class of false positive, and going further adds real complexity for a
    marginal gain given how narrow this tool's job is. Out of scope, noted here on purpose.
+   One variant this misses concretely: a mutation inside a shared test helper (e.g.
+   `_make_simple_bam()`) can turn the target test red for a reason unrelated to its own
+   assertions — a genuine failure, not a collection error, so the failed/error split does
+   not catch it either. Mutations should target production code, not shared test
+   infrastructure, for this reason.
 
 Restricting both runs to a single `test_nodeid` (not the file, not the suite) is what makes
 this check about *that* assertion protecting *that* line, rather than "something somewhere
@@ -118,6 +151,19 @@ design, so a crash in the mutant's test process can't take the harness down with
 (checked directly). This tool is therefore audit tooling, run on demand by whoever is
 reviewing test coverage, the same way the manual recipe in `ba60b80`/`bb6f0d9`/`5262f3a` was
 already being run — not a merge gate. Wiring it into CI is out of scope until CI exists.
+
+## Manifest: a home for the seven known pairs
+
+Four positional arguments per invocation have nowhere to live between runs. Re-checking
+the seven pairs in the Problem section by hand-typing `mutation-check` seven times, with
+multi-line anchors, will not happen — and an unused harness is worse than the documented
+recipe it replaces. v1 therefore adds a manifest, `tests/mutation_findings.yaml`: a list
+of `{file, anchor, replacement, test_nodeid, note}` entries, one per finding above, plus
+a `make mutation-check-all` target that reads it and invokes `mutation_check.py` once per
+entry, printing a caught/not-caught line per pair and exiting non-zero if any pair is no
+longer caught. `make mutation-check FILE=... ANCHOR=... REPLACEMENT=... TEST=...` remains
+the primitive for adding an eighth pair by hand; the manifest is what turns re-checking
+the first seven into one command instead of seven.
 
 ## Scope vs. `mutmut` / `cosmic-ray`
 
@@ -163,9 +209,11 @@ test:       assert gated_value(False, 5) == 5
 ```python
 # scripts/mutation_check.py — sketch, ~60 lines at full size
 def run(file, anchor, replacement, test_nodeid, repo_root):
+    require_so_not_stale(repo_root)                             # .pyx mtime > .so mtime -> hard error
     wt = repo_root / ".mutation-tmp" / uuid.uuid4().hex[:8]     # gitignored, repo-local
     subprocess.run(["git", "worktree", "add", "-q", "--detach", str(wt), "HEAD"], check=True)
     try:
+        copy_so_files(repo_root / "src/fragments_h5", wt / "src/fragments_h5")
         baseline = pytest_junit(wt, test_nodeid)                # PYTHONPATH=wt/src
         require(baseline.passed == 1 and baseline.failed == 0 and baseline.errors == 0,
                 "baseline did not cleanly pass in isolation")
@@ -183,15 +231,18 @@ def run(file, anchor, replacement, test_nodeid, repo_root):
 - The worktree mechanism (tracked-file gate + anchor guard + red/green via junit outcome
   categories) was executed end-to-end this session, in an isolated throwaway repo, and every
   claim above about its behavior is a transcript of a real run, not a prediction.
-- **Not executed inside `fragments_h5` itself**, deliberately — `git worktree add` was kept
-  out of this shared tree per this task's constraint on writing git commands here. The
-  `.mutation-tmp/` path and the real `SubBuildArgs`/SE-gate-shaped mutation are therefore
-  reasoned from the validated mechanism, not independently run against this repo's own
-  fixtures. That is the honest gap in this design's verification, and the first thing an
-  implementer should do is rerun the worked example against a real anchor in this repo.
+- The Cython-extension prerequisite was subsequently verified against a real `git worktree
+  add` of this repo (cleaned up with `git worktree remove` afterward): a fresh worktree
+  reproduces `ERROR tests/test_build_provenance.py` / `Interrupted: 1 error during
+  collection` exactly as prescribed, and copying `sequence*.so` in fixes it (18 tests
+  collect). The anchor-guard/junit red-green mechanism itself is still only verified in the
+  throwaway demo repo, not against a real anchor in `fragments_h5`'s own source — that
+  remains the first thing an implementer should do.
 - The "no traceback provenance check" scope cut (end of the Assertion section) is a real
   limitation, not a false one: a mutation that changes *which* line raises inside the same
   test function, while still landing on an assertion failure, would be reported as caught
   without checking it's the intended assertion. Judged acceptable because it matches the
   granularity of every fix in the Problem section above, none of which needed that.
-- Length: 197 lines (`wc -l`), against the well-under-250 target.
+- Length: 248 lines (`wc -l`) after addressing design review, against the well-under-250
+  target — closer to the target than the original 197, but the additions were the minimum
+  needed to close two required conditions plus two smaller items, not new scope.
