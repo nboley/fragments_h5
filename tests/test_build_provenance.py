@@ -423,8 +423,13 @@ def test_revision_dist_editable_branch(monkeypatch):
     """When git is unavailable and the install IS editable, the resolver
     returns 'dist-editable:<version>'.
 
-    This machine has an editable install, so with git disabled the natural
-    fallback is dist-editable.
+    The editable install is FAKED here, mirroring test_revision_dist_branch.
+    An earlier version of this test relied on the real environment being an
+    editable install, which asserts a property of the machine rather than of
+    the code: importlib.metadata returns whichever *.dist-info / *.egg-info
+    appears first on sys.path, and an egg-info carries no direct_url.json, so
+    it reads as NON-editable. That made this test fail on an ordinary editable
+    checkout of this repo.
 
     Mutation this detects: removing the editable check (the direct_url.json
     probe) makes the result 'dist:...' instead of 'dist-editable:...'.
@@ -433,6 +438,28 @@ def test_revision_dist_editable_branch(monkeypatch):
         raise FileNotFoundError("git")
     monkeypatch.setattr(fh5_module.subprocess, "run", _no_git)
     monkeypatch.delitem(sys.modules, "fragments_h5._build_revision", raising=False)
+
+    # Force the editable check to return editable.
+    # importlib.metadata.version() calls distribution().version internally,
+    # so the wrapper must delegate all attribute access except read_text.
+    real_distribution = importlib.metadata.distribution
+
+    class _EditableDist:
+        def __init__(self, dist):
+            self._dist = dist
+        def read_text(self, name):
+            if name == "direct_url.json":
+                return json.dumps({
+                    "url": "file:///fake/checkout",
+                    "dir_info": {"editable": True},
+                })
+            return self._dist.read_text(name)
+        def __getattr__(self, name):
+            return getattr(self._dist, name)
+
+    def _fake_dist(name):
+        return _EditableDist(real_distribution(name))
+    monkeypatch.setattr(importlib.metadata, "distribution", _fake_dist)
 
     result = _resolve_build_code_revision()
     assert result is not None
