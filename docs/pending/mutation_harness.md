@@ -246,3 +246,48 @@ def run(file, anchor, replacement, test_nodeid, repo_root):
 - Length: 248 lines (`wc -l`) after addressing design review, against the well-under-250
   target — closer to the target than the original 197, but the additions were the minimum
   needed to close two required conditions plus two smaller items, not new scope.
+
+## Addendum: script vs. parametrised pytest test — measured (2026-08-27, `main` @ `c47ae57`)
+
+**Recommendation: hybrid, not a pick.** Keep `scripts/mutation_check.py` (`run_pair()`) as
+the primitive an auditor calls by hand when adding an eighth pair — authoring a new
+anchor/replacement needs iteration a test suite is a bad venue for. Add a thin
+`tests/test_mutations.py` that imports the same `run_pair()` and parametrizes over
+`tests/mutation_findings.yaml`, running under ordinary `pytest`, not opt-in. A pure script
+reintroduces exactly the review's "nothing makes anyone re-run it" gap; a pure test with no
+authoring primitive duplicates work the script already does. One implementation, two callers.
+
+**Cost, measured.** Baseline this session: 92 passed, 258s (biomarker_env pin, no PATH
+prefix) — the design's "331s" and this number both land in "a few minutes" but are not the
+same measurement; suite timing is noisy across sessions, not a fixed constant. Prototyped
+`run_pair()` end-to-end (worktree add → copy `.so` → baseline junit run → mutate → mutant
+junit run → `worktree remove`) against two real pairs: `ba60b80`'s SE gate
+(`test_gate_blocks_filter_when_not_single_end`, BAM build run twice) — **28.7s**; `bb6f0d9`'s
+provenance write (`test_revision_written_into_real_build`) — **8.6s**. Worktree-add +
+`.so`-copy is <0.3s combined in both; the cost is almost entirely the two pytest
+startups/collections. Extrapolating the ~18.6s/pair average to all seven: **~130s**, growing
+the suite from ~258s to **~390s (~1.5×)** if the pinned test runs unconditionally. Real, not
+prohibitive.
+
+**Nested pytest is sound, with one real gotcha.** Ran the prototype sequentially and twice
+**concurrently**; `subprocess.run(capture_output=True)` isolates stdout cleanly, exit codes
+are the expected 0/1. Surprise: pytest 9.x's junit XML root is `<testsuites><testsuite>...`,
+not the bare `<testsuite>` the design's "no custom parsing needed" line implies — both forms
+must handle the wrapper. `-p no:cacheprovider` is hygiene only. Outer `PYTEST_CURRENT_TEST`
+leaks into the inner subprocess's env unless stripped; harmless here, worth stripping on
+principle.
+
+**Isolation and concurrency both hold from inside pytest.** The resolver returns
+`git:v2.12.1-22-gc47ae57` (not `dist-editable:...`) whether driven directly or via the
+prototype's `subprocess.run` call — `PYTHONPATH` must point at the worktree's `src` since
+`fragments_h5` is installed editable against the *main* tree in `biomarker_env`; getting it
+wrong silently re-tests the main tree, not the mutant, with no error. Two simultaneous
+meta-test runs (uuid'd `.mutation-tmp/<id>` paths) both passed, no leftover worktrees after,
+~8% wall-time slowdown from CPU contention only.
+
+**On `pytest.mark.slow` as the answer to speed:** with no CI (verified: no
+`.github/workflows`, no `.gitlab-ci.yml`, no Jenkinsfile), marking it slow/excluded-by-default
+reintroduces the review's own failure mode one step removed — "remember not to exclude the
+marker" instead of "remember to run the script." Recommend including it in the default
+`pytest` run at ~1.5× suite time; revisit only if that becomes a real complaint, as an
+explicit later decision, not a default now.
