@@ -10,6 +10,7 @@ dependencies:
   - h5py
   - pysam
   - tqdm
+  - boto3
   - cython
   - pip
   - c-compiler

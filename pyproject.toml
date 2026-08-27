@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.12.1"
+version = "2.13.1"
 dependencies = [
   "numpy>=1.24",
   "h5py",
   "pysam",
   "tqdm",
+  "boto3",
 ]
 requires-python = ">=3.10"
 authors = [
@@ -32,6 +33,7 @@ Repository = "https://github.com/nboley/fragments_h5"
 
 [project.scripts]
 build-fragments-h5 = "fragments_h5.main:main"
+repair-fragments-h5-gc = "fragments_h5.repair:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

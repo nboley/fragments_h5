@@ -435,7 +435,7 @@ def get_g_or_c_cumsum(fasta_file, chrom, region_start=None, region_stop=None):
     # we add an 'a' to the beginning of the sequence because the fragment interval is open closed
     # for example, imagine that we have a contig with sequence ccccaaaaaa and a fragment
     # with a start of 0 and an end of 1 (a one basepair fragment with sequence 'c'). The cumsum is
-    #    x =  array([1., 1., 1., 1., 1., 2., 3., 4., 5., 6.], dtype=float32)
+    #    x =  array([1., 1., 1., 1., 1., 2., 3., 4., 5., 6.], dtype=float64)
     # so x[1] - x[0] == 1 - 1 == 0
     # padding the beginning with zero fixes this edge condition
     seq = one_hot_encode_sequences([('a' + contig_seq).encode()])[0]

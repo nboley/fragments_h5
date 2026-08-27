@@ -169,15 +169,23 @@ tuple above is a separate, still-positional shape, deliberately out of scope for
 fragments_h5/
 ├── src/fragments_h5/           # Main package
 │   ├── __init__.py             # Exports FragmentsH5
-│   ├── main.py                 # CLI entry point
+│   ├── main.py                 # CLI entry point (build-fragments-h5)
 │   ├── fragments_h5.py         # Core: FragmentsH5 class, build logic
 │   ├── fragment.py             # Fragment dataclass, BAM parsing
 │   ├── sequence.pyx            # Cython: GC calculation, one-hot encoding
+│   ├── repair.py               # CLI entry point (repair-fragments-h5-gc)
 │   └── _logging.py             # Logging configuration
 ├── tests/                      # pytest test suite
 │   ├── data/                   # Test BAMs, FASTA files
 │   ├── test_fragments_h5.py    # Core library tests
 │   ├── test_fragment.py        # Fragment dataclass tests
+│   ├── test_fragment_selection.py  # Secondary alignment exclusion, SE bounds, contig skip
+│   ├── test_build_provenance.py    # _build_argv / _build_version round-trip
+│   ├── test_cli_validation.py      # CLI argument validation
+│   ├── test_contig_name_map.py     # --contig-name-map tests
+│   ├── test_worker_args.py         # SubBuildArgs dataclass tests
+│   ├── test_gc_cumsum_overflow.py  # Regression test for float32 saturation bug
+│   ├── test_gc_repair.py           # Repair tool tests (54 tests)
 │   ├── test_s3_bam.py          # S3 streaming tests (conditional)
 │   ├── test_create_duplicate_sam.py
 │   ├── test_docker_build.py    # Manual Docker test
@@ -192,8 +200,14 @@ fragments_h5/
 │   └── conda_build_config.yaml
 ├── docs/
 │   ├── architecture/
+│   │   ├── build_version_provenance_correctness.md
 │   │   ├── fragment_selection_and_build_provenance.md
-│   │   └── build_version_provenance_correctness.md
+│   │   ├── gc_repair_tool.md
+│   │   └── worker_args_refactor.md
+│   ├── pending/
+│   │   ├── build_provenance_metadata.md  # REJECTED, superseded
+│   │   ├── gc_repair_tool.md           # stale duplicate of architecture/ copy
+│   │   └── mutation_harness.md         # designed; implementation parked on a branch
 │   └── plan_chunk_based_parallelization.md
 ├── pyproject.toml              # pip package metadata
 ├── setup.py                    # Cython extension build
@@ -448,6 +462,13 @@ make docker
 |------|-------|
 | `test_fragments_h5.py` | Core library: build, fetch, fetch_array, counts, cache, regions, pickle, include_duplicates, fragment_end_clipped, output-exists check, multiprocessing stress tests |
 | `test_fragment.py` | Fragment dataclass: equality, length, midpoint, mapq, strand normalization |
+| `test_fragment_selection.py` | Secondary alignment exclusion, SE oversized span handling, single-mapped-read contig inclusion |
+| `test_build_provenance.py` | `_build_argv` / `_build_version` round-trip and backward compat |
+| `test_cli_validation.py` | CLI argument validation (SE flags, min-mapq, output-exists) |
+| `test_contig_name_map.py` | `--contig-name-map` / `contig_name_map` parameter |
+| `test_worker_args.py` | `SubBuildArgs` dataclass (replaced positional tuple) |
+| `test_gc_cumsum_overflow.py` | Regression test for float32 cumsum saturation (~676 MB RSS) |
+| `test_gc_repair.py` | Repair tool: truncation, GC recompute, rounding, region classification, e2e (54 tests, some marked `slow`) |
 | `test_s3_bam.py` | S3 BAM/FASTA streaming (skipped when S3 not available) |
 | `test_create_duplicate_sam.py` | Generate test data for duplicate tests |
 | `test_docker_build.py` | Manual Docker vs local build comparison (not run via pytest) |
@@ -562,7 +583,31 @@ def _temporary_working_directory():
 - S3 index files downloaded per worker (temp dir overhead)
 - No streaming for index data (entire contig index loaded)
 
-### 7.3 Resolved Issues
+### 7.3 Known GC Defects and Repair Tool
+
+**GC float32 cumsum saturation** (introduced `1c550f0`, fixed `95c76f5`):
+- Affected tags: v2.2.1–v2.6.0. Fixed from v2.7.2.
+- The per-contig G/C cumsum was accumulated in float32, which saturates at 2\*\*24.
+  All `gc` values past ~40 Mb per contig are stored as 0.
+- 218 production files under `s3://fragmentomics.kariusdx.com/nboley/ibd_v2/` are affected.
+
+**Phantom trailing fragment** (introduced `caddb89`, fixed `778f4d1`):
+- No tagged release carries this. Only affects files built from unreleased `main`
+  between 2025-11-19 and 2025-12-17.
+- Every per-contig dataset has one extra zero-filled row. `n_fragments` is over-reported.
+- The same 218 production files carry this defect.
+
+**Repair tool:** `repair-fragments-h5-gc` (`src/fragments_h5/repair.py`) exists to fix
+both defects. It is `--dry-run` by default and has **not been run against production**.
+See `docs/architecture/gc_repair_tool.md` for details and
+`docs/pending/gc_repair_tool.md` for the full design document.
+
+**`has_gc` uses `any()`** (`fragments_h5.py:363`): a file with `gc` on some contigs but
+not others reports `has_gc == True`, and a consumer iterating all contigs gets a
+`KeyError`. The same `any()` semantics apply to `has_strand`, `has_methyl`, and
+`has_fragment_end_clipped`. This is **live and unfixed**.
+
+### 7.4 Resolved Issues
 
 **Multiprocessing Test Hang (Fixed in v2.7.0):**
 - **Previous Issue:** Tests hung when num_processes > 1 with small BAMs
@@ -570,7 +615,7 @@ def _temporary_working_directory():
 - **Resolution:** Switched to fork method, added timeout tests
 - **Validation:** Stress tests with 8 workers on 1-contig BAM
 
-### 7.4 Build System Quirks
+### 7.5 Build System Quirks
 
 **rattler-build Cleanup:**
 - rattler-build may exit with non-zero status during cleanup even when build succeeds
@@ -618,6 +663,13 @@ build-fragments-h5 input.bam output.fragments.h5 \
 ```bash
 build-fragments-h5 input.bam output.fragments.h5 \
     --include-duplicates
+```
+
+**Repair Tool (dry-run on a local file):**
+```bash
+repair-fragments-h5-gc \
+    --fasta reference.fa.gz \
+    --local-file damaged.fragments.h5
 ```
 
 ### 8.2 Python API Usage
