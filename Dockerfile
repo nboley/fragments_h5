@@ -19,7 +19,18 @@ RUN if [ -n "$BUILD_CODE_REVISION" ]; then \
             > src/fragments_h5/_build_revision.py; \
     fi && \
     python setup.py build_ext --inplace && \
-    pip install --no-cache-dir --no-deps .
+    pip install --no-cache-dir --no-deps . && \
+    # awscrt is installed explicitly because the line above uses --no-deps, so
+    # nothing in pyproject.toml reaches this image. repair.py uploads with
+    # ChecksumAlgorithm="CRC64NVME", which botocore can only compute with the
+    # AWS CRT bindings; the conda env does not provide them. Installed with pip
+    # rather than conda because the cp313-abi3 wheel works on this image's
+    # Python 3.14, whereas the conda-forge builds lag the interpreter.
+    pip install --no-cache-dir awscrt && \
+    # Fail the BUILD rather than the 218th production upload. This assertion
+    # exists because the missing dependency was invisible until the write path
+    # ran for the first time against real S3, three minutes into a repair.
+    python -c "import awscrt, botocore; print('awscrt', awscrt.__version__)"
 
 # Remove build-time-only packages (but not pip which would remove python)
 RUN micromamba remove -y -n base c-compiler cython && \

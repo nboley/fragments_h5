@@ -4,13 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fragments-h5"
-version = "2.13.1"
+version = "2.13.2"
 dependencies = [
   "numpy>=1.24",
   "h5py",
   "pysam",
   "tqdm",
-  "boto3",
+  # [crt] is required, not optional: repair.py uploads with
+  # ChecksumAlgorithm="CRC64NVME", which botocore cannot compute without the
+  # AWS CRT bindings. Without it every upload raises MissingDependencyException
+  # at the moment of writing to S3 -- after the repair has already been done.
+  "boto3[crt]",
 ]
 requires-python = ">=3.10"
 authors = [
