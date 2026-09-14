@@ -4,7 +4,7 @@ Repairs two defects in fragment H5 files:
 1. GC float32 cumsum saturation (commit 95c76f5, fixed 2026-03-09)
 2. Trailing phantom padding row (commit 778f4d1, fixed 2025-12-17)
 
-See docs/pending/gc_repair_tool.md for the full design document.
+See docs/architecture/gc_repair_tool_design.md for the full design document.
 """
 
 import argparse
