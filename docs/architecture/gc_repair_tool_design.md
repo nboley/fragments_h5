@@ -1553,7 +1553,7 @@ no oracle for it. The backstop is the backup.
 The 218 files carry **no build provenance at all** — `_build_version` / `_build_argv` landed in
 v2.12.0 (`a3be97b`, 2026-08-21) and these files predate it. The current authority,
 `docs/architecture/fragment_selection_and_build_provenance.md`, records those as flat root attrs and
-**defines no repair-provenance field**. (Note: `docs/pending/build_provenance_metadata.md` is marked
+**defines no repair-provenance field**. (Note: `docs/archive/build_provenance_metadata.md` is marked
 REJECTED/superseded and should not be used as a reference.)
 
 ### 9.1 Proposed attr
@@ -1571,7 +1571,7 @@ Each element:
  "version": "2.13.0",
  "argv": ["repair-fragments-h5-gc", "--fasta", "...", "--apply", ...],
  "timestamp_utc": "2026-08-25T17:04:11Z",
- "reason": "gc-float32-cumsum-saturation (fixed by 95c76f5) + trailing padding row (fixed by 778f4d1); see docs/pending/gc_repair_tool.md",
+ "reason": "gc-float32-cumsum-saturation (fixed by 95c76f5) + trailing padding row (fixed by 778f4d1); see docs/architecture/gc_repair_tool_design.md",
  "datasets": ["data/*/gc", "data/*/* (truncated by 1 row)", "index/*", "fragment_length_counts"],
  "rows_removed_per_contig": 1,
  "fasta_uri": "s3://fragmentomics.kariusdx.com/nboley/resources/GRCh38.p12.genome.fa.gz",

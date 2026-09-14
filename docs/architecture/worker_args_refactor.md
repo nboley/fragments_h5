@@ -71,7 +71,7 @@ Two conclusions follow, and they set the design's acceptance criteria:
 
 ### 1.3 This work is already anticipated
 
-`docs/pending/build_provenance_metadata.md:518-520` — "The worker tuple is a real maintenance hazard and may deserve its own design; it is not coupled to this one." `docs/architecture/fragment_selection_and_build_provenance.md:637-653` — "The tuple remains the acknowledged root cause of this bug class and has its own deferred design; it is out of scope here." `COORDINATION.resolve-uncommitted-cli-flags.md` records the explicit prohibition given to a prior agent ("no worker-tuple refactor") and an EM verification note at `a3be97b` confirming it was honoured. The deferral is documented fact, not folklore.
+`docs/archive/build_provenance_metadata.md:518-520` — "The worker tuple is a real maintenance hazard and may deserve its own design; it is not coupled to this one." `docs/architecture/fragment_selection_and_build_provenance.md:637-653` — "The tuple remains the acknowledged root cause of this bug class and has its own deferred design; it is out of scope here." `COORDINATION.resolve-uncommitted-cli-flags.md` records the explicit prohibition given to a prior agent ("no worker-tuple refactor") and an EM verification note at `a3be97b` confirming it was honoured. The deferral is documented fact, not folklore.
 
 ---
 

@@ -202,12 +202,13 @@ fragments_h5/
 │   ├── architecture/
 │   │   ├── build_version_provenance_correctness.md
 │   │   ├── fragment_selection_and_build_provenance.md
-│   │   ├── gc_repair_tool.md
+│   │   ├── gc_repair_tool.md            # short summary, points at design doc below
+│   │   ├── gc_repair_tool_design.md     # full design document
 │   │   └── worker_args_refactor.md
-│   ├── pending/
+│   ├── archive/
 │   │   ├── build_provenance_metadata.md  # REJECTED, superseded
-│   │   ├── gc_repair_tool.md           # stale duplicate of architecture/ copy
-│   │   └── mutation_harness.md         # designed; implementation parked on a branch
+│   │   └── mutation_harness.md           # WON'T DO; working impl parked on a branch
+│   ├── pending/                          # empty; nothing currently queued
 │   └── plan_chunk_based_parallelization.md
 ├── pyproject.toml              # pip package metadata
 ├── setup.py                    # Cython extension build
@@ -600,7 +601,7 @@ def _temporary_working_directory():
 **Repair tool:** `repair-fragments-h5-gc` (`src/fragments_h5/repair.py`) exists to fix
 both defects. It is `--dry-run` by default and has **not been run against production**.
 See `docs/architecture/gc_repair_tool.md` for details and
-`docs/pending/gc_repair_tool.md` for the full design document.
+`docs/architecture/gc_repair_tool_design.md` for the full design document.
 
 **`has_gc` uses `any()`** (`fragments_h5.py:363`): a file with `gc` on some contigs but
 not others reports `has_gc == True`, and a consumer iterating all contigs gets a

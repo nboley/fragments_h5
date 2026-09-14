@@ -1,6 +1,6 @@
 # Fragment Selection Correctness and Build Provenance
 
-Supersedes `docs/pending/build_provenance_metadata.md`. That document proposed a
+Supersedes `docs/archive/build_provenance_metadata.md`. That document proposed a
 `requested`/`effective`/`neutralized` provenance schema and was rejected as
 over-engineered; do not extend it.
 

@@ -3,7 +3,7 @@
 Status: **implemented** (branch `build-revision-provenance`, commits `0f787af`..`bb6f0d9`).
 Scope: `_build_code_revision` resolver, `_build_version` removal, and clean-tree gate.
 `_build_argv` is correct and out of scope.
-Not related to `docs/pending/build_provenance_metadata.md`, which is REJECTED — do not extend that design.
+Not related to `docs/archive/build_provenance_metadata.md`, which is REJECTED — do not extend that design.
 
 ## Problem
 

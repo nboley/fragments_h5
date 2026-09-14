@@ -3,7 +3,7 @@
 The console script `repair-fragments-h5-gc` (`src/fragments_h5/repair.py`) repairs two
 independent defects in fragment H5 files. It exists and has a full test suite but has
 **not been run against production data**. The full design document with correctness
-arguments and review history is at `docs/pending/gc_repair_tool.md`.
+arguments and review history is at `docs/architecture/gc_repair_tool_design.md`.
 
 ## The two defects
 
@@ -139,7 +139,7 @@ repair-fragments-h5-gc \
 | `src/fragments_h5/repair.py` | Tool implementation (CLI + repair pipeline) |
 | `tests/test_gc_repair.py` | Test suite (54 tests incl. rounding, region classification, e2e) |
 | `tests/test_gc_cumsum_overflow.py` | Regression test for the float32 saturation bug |
-| `docs/pending/gc_repair_tool.md` | Full design document with correctness arguments |
+| `docs/architecture/gc_repair_tool_design.md` | Full design document with correctness arguments |
 
 ## Reference safety
 
