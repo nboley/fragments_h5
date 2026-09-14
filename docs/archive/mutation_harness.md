@@ -1,7 +1,29 @@
 # Design: a repeatable mutation-testing harness
 
-**Status:** proposal, not implemented. **Verified against:** `main` @ `f9971d0` (2026-08-27);
-the Cython-extension prerequisite (below) additionally re-verified against `main` @ `ad89735`.
+**Status: WON'T DO — abandoned 2026-08-27 by user decision. Not implemented; not planned.**
+
+It *was* built and worked. Branch `mutation-harness` @ `7082efe` carries a working
+implementation: 5 verified (mutation, test) pairs, suite 92 → 97 passing, and both
+`CAUGHT` and `NOT CAUGHT` verdicts demonstrated by execution. That branch is unmerged
+and unreviewed. Recover with `git worktree add <path> mutation-harness` if it is ever
+wanted; see the end of this file for why you probably should not.
+
+**Why abandoned:** the cost is permanent and paid by everyone — roughly +80s on every
+run of the suite, forever — while the benefit is insurance against the recurrence of
+seven defects that are already fixed and merged. It also arrived unreviewed, was 21
+commits behind `main`, pinned only 5 of the 7 findings it existed to pin, and put
+nested-pytest worktree churn into the default suite of a repo with no CI and frequent
+concurrent sessions. Too much cost for too little gain.
+
+**What survives, and is the actual point:** the seven findings themselves are fixed and
+their regression tests are merged on `main`. The durable lesson needs no tooling —
+*seven tests passed whether or not the code they protected worked, all seven were caught
+by mutation, and none by reading*, including by three formal review gates. When you need
+to know whether a test protects a line, delete the line and watch what turns red.
+
+**Original status line, for the record:** proposal, not implemented. Verified against
+`main` @ `f9971d0` (2026-08-27); the Cython-extension prerequisite (below) additionally
+re-verified against `main` @ `ad89735`.
 
 ## Problem
 
