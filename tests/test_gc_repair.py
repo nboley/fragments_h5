@@ -641,6 +641,109 @@ class TestSyntheticPaddingFixture:
                 assert verdict == "clean", f"{contig}: expected 'clean', got {verdict}"
 
 
+def _two_row_contig(path, starts, lengths, gc):
+    """Minimal H5 with one contig of exactly the given rows."""
+    with h5py.File(path, "w") as f:
+        g = f.create_group("data/chrUn_JTFH01000450v1_decoy")
+        g.create_dataset("starts", data=np.asarray(starts, dtype="int32"))
+        g.create_dataset("lengths", data=np.asarray(lengths, dtype="uint16"))
+        g.create_dataset("gc", data=np.asarray(gc, dtype="uint8"))
+    return "chrUn_JTFH01000450v1_decoy"
+
+
+class TestPaddingRowZeroStartPredecessor:
+    """The (b)-only branch: a padding row whose predecessor also starts at 0.
+
+    Condition (a) asks `last_start < penult_start`. When the single real fragment
+    sits at position 0 -- routine on short decoy contigs -- that reduces to 0 < 0 and
+    can never be true, so (a) cannot corroborate (b) no matter how clearly the row is
+    a padding row. 31 production files aborted on exactly this.
+
+    These tests pin the boundary in both directions: the case must truncate, and
+    every neighbouring case must keep its previous verdict.
+    """
+
+    def test_zero_start_predecessor_truncates(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [0, 0], [78, 0], [255, 0])
+            with h5py.File(p, "r") as f:
+                assert detect_padding_row(f, c) == "truncate"
+
+    def test_nonzero_last_length_is_clean_not_truncate(self):
+        """cond_b is NOT weakened: a real fragment at 0 with length > 0 stays clean."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [0, 0], [78, 42], [255, 130])
+            with h5py.File(p, "r") as f:
+                assert detect_padding_row(f, c) == "clean"
+
+    def test_nonzero_last_gc_still_aborts(self):
+        """One non-zero element in the final row breaks cond_b -> back to abort.
+
+        starts=[5, 0] gives cond_a=True (0 < 5) while gc[-1]=7 makes cond_b False,
+        so the branches disagree and the tool must refuse to guess.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [5, 0], [78, 0], [255, 7])
+            with h5py.File(p, "r") as f:
+                with pytest.raises(RepairAbort):
+                    detect_padding_row(f, c)
+
+    def test_sortedness_violation_without_zero_row_still_aborts(self):
+        """cond_a alone must never truncate -- that direction is unchanged."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [100, 50], [78, 42], [255, 130])
+            with h5py.File(p, "r") as f:
+                with pytest.raises(RepairAbort):
+                    detect_padding_row(f, c)
+
+    def test_nonzero_penult_start_takes_the_ORIGINAL_branch(self):
+        """The same padding row one base further along needs no new branch.
+
+        `starts=[5, 0]` makes cond_a true (0 < 5), so this is the ordinary
+        (a and b) case. Contrasting it with `starts=[0, 0]` is what shows the new
+        branch is needed only when the predecessor sits exactly at 0, rather than
+        being a general loosening of the check.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [5, 0], [78, 0], [255, 0])
+            with h5py.File(p, "r") as f:
+                assert detect_padding_row(f, c) == "truncate"
+
+    def test_many_rows_all_starting_at_zero(self):
+        """>2 rows, every real fragment at 0 -- still exactly one padding row."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [0, 0, 0, 0], [78, 91, 64, 0], [255, 255, 255, 0])
+            with h5py.File(p, "r") as f:
+                assert detect_padding_row(f, c) == "truncate"
+            with h5py.File(p, "r+") as f:
+                truncate_contig_datasets(f, c)
+            with h5py.File(p, "r") as f:
+                g = f["data"][c]
+                assert g["starts"].shape == (3,)
+                assert g["lengths"][:].tolist() == [78, 91, 64]
+
+    def test_truncation_removes_only_the_padding_row(self):
+        """The new branch must feed truncation that keeps the real fragment."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.h5")
+            c = _two_row_contig(p, [0, 0], [78, 0], [255, 0])
+            with h5py.File(p, "r+") as f:
+                assert detect_padding_row(f, c) == "truncate"
+                truncate_contig_datasets(f, c)
+            with h5py.File(p, "r") as f:
+                g = f["data"][c]
+                assert g["starts"].shape == (1,)
+                assert int(g["starts"][0]) == 0
+                assert int(g["lengths"][0]) == 78
+                assert int(g["gc"][0]) == 255
+
+
 # ---------------------------------------------------------------------------
 # 0.c — 2-D mapq truncation along axis 0 only (§2.2.2)
 # ---------------------------------------------------------------------------
@@ -944,14 +1047,30 @@ class TestDetectPaddingRow:
                 with pytest.raises(RepairAbort, match="exactly one"):
                     detect_padding_row(f, "chr1")
 
-    def test_abort_on_zero_signature_without_sortedness_violation(self):
-        """The other single-condition case: cond_b holds but cond_a does not.
+    def test_zero_signature_without_sortedness_violation_truncates(self):
+        """REVERSED 2026-09-16. This case now truncates; it used to abort.
 
-        cond_a is `starts[-1] < starts[-2]`, and the phantom row's start is 0,
-        so cond_a can only fail when the preceding start is also 0. That is what
-        this builds: a real fragment at position 0 followed by an all-zero row.
-        The zero signature fires, the sortedness check cannot, and the file must
-        go to human review rather than being silently truncated.
+        The original version of this test asserted `RepairAbort` here, and its
+        reasoning was correct as far as it went: cond_a can only fail when the
+        preceding start is also 0, so the sortedness check cannot corroborate the
+        zero signature, and the safe default was to demand human review.
+
+        That human review has now happened, against real data the original author
+        did not have. 31 production files aborted on precisely this layout. Every
+        one was a short decoy contig holding a single real fragment at position 0
+        followed by an all-zero row, and in a full scan of one such file 2,296 of
+        its 2,297 contigs took the ordinary (a and b) branch while exactly one
+        landed here. The abort was not protecting against a hazard; it was
+        reporting that a corroborating signal is arithmetically unable to fire.
+
+        What actually makes truncation safe is cond_b, not cond_a: cond_b requires
+        EVERY dataset's final element to be zero, including `lengths[-1] == 0`, and
+        a zero-length fragment is not a real observation. That is the same argument
+        the (a and b) branch has always relied on.
+
+        The abort is retained for every other disagreement -- see
+        `test_abort_on_mixed_signal` (cond_a without cond_b) and
+        `TestPaddingRowZeroStartPredecessor::test_nonzero_last_gc_still_aborts`.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             h5_path = os.path.join(tmpdir, "test.h5")
@@ -973,8 +1092,17 @@ class TestDetectPaddingRow:
                 f["fragment_length_counts"] = np.zeros(65536)
 
             with h5py.File(h5_path, "r") as f:
-                with pytest.raises(RepairAbort, match="cond_a=False, cond_b=True"):
-                    detect_padding_row(f, "chr1")
+                assert detect_padding_row(f, "chr1") == "truncate"
+
+            # The real fragment survives; only the all-zero row goes.
+            with h5py.File(h5_path, "r+") as f:
+                truncate_contig_datasets(f, "chr1")
+            with h5py.File(h5_path, "r") as f:
+                grp = f["data/chr1"]
+                assert grp["starts"].shape == (1,)
+                assert int(grp["lengths"][0]) == 30
+                assert int(grp["gc"][0]) == 100
+                assert grp["mapq"].shape == (1, 2)
 
     def test_single_fragment_is_clean(self):
         """A contig with n=1 (< 2) is always clean."""

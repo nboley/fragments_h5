@@ -246,6 +246,31 @@ def detect_padding_row(f, contig):
         return "truncate"
     elif not cond_a and not cond_b:
         return "clean"
+    elif cond_b and last_start == 0 and penult_start == 0:
+        # Condition (a) is a corroborating signal, not an independent one, and it is
+        # structurally incapable of firing when the preceding fragment also starts at
+        # 0: `cond_a` asks whether 0 < 0, which is never true. That happens on short
+        # decoy contigs carrying a single real fragment at position 0.
+        #
+        # Condition (b) is not weakened here -- it still requires EVERY dataset's
+        # final element to be zero, including `lengths[-1] == 0`, and a zero-length
+        # fragment is not a real observation. Treating this as a padding row is the
+        # same conclusion the (a and b) branch reaches, on the same evidence minus a
+        # check that cannot apply.
+        #
+        # Measured on the population that forced this: 31 files, every one with a
+        # 2-row contig of [real fragment at start 0, all-zero row]. In a full scan of
+        # one such file, 2,296 of 2,297 contigs took the (a and b) branch and exactly
+        # one landed here. Any OTHER disagreement between (a) and (b) still aborts.
+        #
+        # Both explicit start checks are REDUNDANT and deliberately so. `cond_b`
+        # already requires `last_start == 0`, and reaching this branch means
+        # cond_b and not cond_a, i.e. not (0 < penult_start), so penult_start <= 0 --
+        # which for non-negative genomic coordinates forces penult_start == 0. They
+        # are kept as defence-in-depth against a negative coordinate that should be
+        # impossible, and so the branch reads as a complete statement of its case
+        # rather than one implied by two lines of upstream control flow.
+        return "truncate"
     else:
         raise RepairAbort(
             f"Contig {contig}: exactly one of (sortedness violation, zero signature) holds — "
