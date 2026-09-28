@@ -274,6 +274,41 @@ logging:
                         (see LogRecord in the logging module docs).
 ```
 
+## Derived data: use sidecar files, not the H5
+
+Per-sample summaries computed *from* an H5 — duplicate-multiplicity histograms, fragment
+length distributions, and the like — belong in a **sidecar file stored beside the H5**, one
+file per derived-data type, named by appending to the H5's own filename:
+
+```
+<h5 filename>.<type>.json.gz
+
+RD-12345.hg38.fragments.h5              <- the immutable input
+RD-12345.hg38.fragments.h5.duphist.json.gz   <- derived, regenerable
+```
+
+The suffix makes the sidecar sort next to its source and self-describe its type, so no
+separate registry of "what derived data exists" is needed.
+
+**Why not store it in the H5.** An H5's identity is its content hash, and content-addressed
+stores pin that hash. A derived summary is a function of *code version and parameters*, which
+change far more often than the fragments do. Recomputing a summary held inside the H5 either
+changes the file's hash — invalidating every downstream pin — or mutates it in place so the
+recorded hash no longer matches. A sidecar decouples a small, frequently recomputed artifact
+from a large, never-changing one.
+
+Two rules that follow from experience:
+
+- **One file per derived-data type, not one file holding all types.** A shared file means
+  read-modify-write, and object stores have no partial update, so a concurrent producer
+  silently loses another's keys.
+- **Record the source H5's hash inside the sidecar.** Data embedded in an H5 cannot drift
+  from it; a sidecar can. That binding is what makes the separation safe, and without it a
+  sidecar is strictly more dangerous than embedding.
+
+Note that the per-fragment `lengths` array is raw data and stays in the H5 — it is the
+*distribution* over those lengths that is derived and does not belong there.
+
 ## Algorithm Description:
 This data structure is designed for quickly finding all fragments that overlap an interval.
 
