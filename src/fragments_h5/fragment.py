@@ -691,6 +691,12 @@ def tsv_to_fragments(
 
             if expected_ncols is None:
                 expected_ncols = ncols
+                if ncols == 7:
+                    raise ValueError(
+                        f"7-column TSV/BED files are not supported. "
+                        f"MAPQ requires exactly two columns (mapq1, mapq2) after BED6. "
+                        f"Use 3-6 columns for no MAPQ, or 8 columns to include both mapq1 and mapq2."
+                    )
 
             if ncols < 3:
                 skipped += 1
@@ -733,6 +739,25 @@ def tsv_to_fragments(
             else:
                 strand = None
 
+            # Parse MAPQ from columns 6 and 7 if present (8+ column files)
+            if ncols >= 8:
+                try:
+                    mapq1 = int(parts[6])
+                    mapq2 = int(parts[7])
+                except ValueError:
+                    skipped += 1
+                    log.warning("Skipping row with non-integer MAPQ: %r", line)
+                    continue
+                if not (0 <= mapq1 <= 255 and 0 <= mapq2 <= 255):
+                    skipped += 1
+                    log.warning(
+                        "Skipping row with out-of-range MAPQ (must be 0-255): %r", line
+                    )
+                    continue
+            else:
+                mapq1 = None
+                mapq2 = None
+
             if g_or_c_cumsum is None or frag_stop == frag_start:
                 gc = None
             else:
@@ -746,8 +771,8 @@ def tsv_to_fragments(
                 chrom=chrom,
                 start=frag_start,
                 stop=frag_stop,
-                mapq1=None,
-                mapq2=None,
+                mapq1=mapq1,
+                mapq2=mapq2,
                 gc=gc,
                 strand=strand,
                 cell_barcode=cell_barcode,
