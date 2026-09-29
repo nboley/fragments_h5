@@ -346,6 +346,7 @@ def one_hot_encode_sequences(sequences: list[str]) -> np.ndarray:
 - Range validation: `--se-max-fragment-length` must be 1–65535; `--min-mapq` must be >= 0
 - For BAM input: `--se-max-fragment-length` required with `--single-end`, rejected without it
 - For TSV/BED input: `--single-end`, `--se-max-fragment-length`, and `--min-mapq` are warned about and neutralized (these flags are BAM-only)
+- For TSV/BED input: 7-column files are rejected (ambiguous single MAPQ column); 8+ column files parse mapq1/mapq2 from columns 7-8; `--set-mapq-255-to-none` is neutralized for files without MAPQ columns
 - Checks BAM index exists (runs `samtools index` if local, fails if remote)
 - Validates FASTA accessibility for S3 URLs (requires `.fai`, `.gzi` for compressed)
 
@@ -1224,6 +1225,11 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 - **S3 input fix:** `os.path.abspath` was mangling `s3://b/k.bam` into `/cwd/s3:/b/k.bam`. Remote URLs are now detected by a generic scheme regex and left untouched. Also covers `gs://`, `https://`, `ftp://`, etc.
 - **Build provenance:** New h5 attributes `_build_argv` (JSON array, CLI builds only) and `_build_code_revision` (self-labeling revision string). Exposed as `FragmentsH5.build_argv`, `FragmentsH5.build_code_revision`, and `FragmentsH5.build_version` (legacy read-only). `_build_version` is no longer written to new files; `build_version` returns `None` except for files built by 2.12.0/2.12.1. `build_argv` is keyword-only in `build_fragments_h5()`; library callers get `_build_code_revision` only.
 - **`numpy>=1.24` floor:** Added to `pyproject.toml` dependencies. Ensures out-of-range uint16 assignment always raises, closing the last environment-dependent failure mode.
+
+### Unreleased (tsv-mapq-support branch)
+- **TSV/BED MAPQ parsing:** 8-column TSV/BED files (BED6 + mapq1 + mapq2) now have MAPQ values parsed from columns 7-8 and stored in the H5. Files with 3-6 columns continue as before (no MAPQ). 7-column files are rejected as ambiguous.
+- **`--set-mapq-255-to-none` for TSV:** Now works correctly with 8-column TSV input (applies the 255→None mapping). For files without MAPQ columns, the flag is warned and neutralized.
+- **Test coverage:** 6 new tests in `test_cli_validation.py::TestTsvMapqSupport` covering round-trip values, 255 assertion, 7-column rejection, 6-column regression, and warning behavior.
 
 ### v2.11.0 Changelog
 - **`--se-max-fragment-length` CLI flag:** Maximum fragment length filter for single-end mode. Required with `--single-end` for BAM input. Range: 1–65535 (uint16 `lengths_arr` limit). Fragments with alignment span exceeding this value are excluded.
