@@ -320,6 +320,151 @@ class TestSeFilterGating:
 
 # ── is_fragment_file ──
 
+# ── TSV MAPQ support ──
+
+@pytest.fixture(scope="module")
+def tsv_fragment_file_8col():
+    """Create a bgzipped, tabix-indexed 8-column TSV fragment file with MAPQ."""
+    import pysam
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plain_path = os.path.join(tmpdir, "test_frags_8col.tsv")
+        with open(plain_path, "w") as f:
+            # BED6 + mapq1 + mapq2
+            # Coordinates within the FASTA test region (chr6:99110000-99130000)
+            f.write("chr6\t99115000\t99115200\tfrag1\t0\t+\t30\t40\n")
+            f.write("chr6\t99115300\t99115500\tfrag2\t0\t+\t60\t0\n")
+            f.write("chr6\t99115600\t99115700\tfrag3\t0\t-\t255\t255\n")
+
+        pysam.tabix_compress(plain_path, plain_path + ".gz", force=True)
+        bgz_path = plain_path + ".gz"
+        pysam.tabix_index(bgz_path, preset="bed", force=True)
+        yield bgz_path
+
+
+@pytest.fixture(scope="module")
+def tsv_fragment_file_7col():
+    """Create a bgzipped, tabix-indexed 7-column TSV fragment file (unsupported)."""
+    import pysam
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plain_path = os.path.join(tmpdir, "test_frags_7col.tsv")
+        with open(plain_path, "w") as f:
+            f.write("chr6\t99115000\t99115200\tfrag1\t0\t+\t30\n")
+
+        pysam.tabix_compress(plain_path, plain_path + ".gz", force=True)
+        bgz_path = plain_path + ".gz"
+        pysam.tabix_index(bgz_path, preset="bed", force=True)
+        yield bgz_path
+
+
+class TestTsvMapqSupport:
+    """Test MAPQ parsing from 8-column TSV/BED input."""
+
+    def test_round_trip_mapq_values(self, tsv_fragment_file_8col, fasta_file_path):
+        """Build from 8-col TSV, verify MAPQ values survive the round-trip."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            build_fragments_h5(
+                tsv_fragment_file_8col,
+                output,
+                fasta_filename=fasta_file_path,
+                set_mapq_255_to_none=True,
+                num_processes=1,
+            )
+            with FragmentsH5(output) as fh5:
+                assert fh5.n_fragments == 3
+                starts, stops, supp = fh5.fetch_array(
+                    "chr6", return_mapqs=True
+                )
+                assert len(starts) == 3
+                # frag1: mapq1=30, mapq2=40
+                assert supp["mapq"][0, 0] == 30
+                assert supp["mapq"][0, 1] == 40
+                # frag2: mapq1=60, mapq2=0
+                assert supp["mapq"][1, 0] == 60
+                assert supp["mapq"][1, 1] == 0
+                # frag3: mapq1=255, mapq2=255 -> both set to -1 (None)
+                # because set_mapq_255_to_none=True
+                assert supp["mapq"][2, 0] == -1
+                assert supp["mapq"][2, 1] == -1
+
+    def test_mapq_255_without_opt_in_raises(self, tsv_fragment_file_8col, fasta_file_path):
+        """MAPQ 255 in TSV without set_mapq_255_to_none should raise, same as BAM."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            with pytest.raises(AssertionError, match="MAPQ1 of 255"):
+                build_fragments_h5(
+                    tsv_fragment_file_8col,
+                    output,
+                    fasta_filename=fasta_file_path,
+                    set_mapq_255_to_none=False,
+                    num_processes=1,
+                )
+
+    def test_7_column_rejected(self, tsv_fragment_file_7col, fasta_file_path):
+        """7-column TSV files should be rejected with a clear error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            with pytest.raises(ValueError, match="7-column TSV/BED files are not supported"):
+                build_fragments_h5(
+                    tsv_fragment_file_7col,
+                    output,
+                    fasta_filename=fasta_file_path,
+                    num_processes=1,
+                )
+
+    def test_6_col_tsv_still_has_no_mapq(self, tsv_fragment_file, fasta_file_path):
+        """Existing 6-column TSV files should still produce None/255 MAPQ (regression)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            build_fragments_h5(
+                tsv_fragment_file,
+                output,
+                fasta_filename=fasta_file_path,
+                num_processes=1,
+            )
+            with FragmentsH5(output) as fh5:
+                assert fh5.n_fragments == 3
+                starts, stops, supp = fh5.fetch_array(
+                    "chr6", return_mapqs=True
+                )
+                # All MAPQs should be -1 (stored as 255 = unknown, returned as -1)
+                assert (supp["mapq"] == -1).all()
+
+    def test_set_mapq_255_warning_suppressed_for_8col(
+        self, tsv_fragment_file_8col, fasta_file_path, caplog
+    ):
+        """--set-mapq-255-to-none should NOT warn 'meaningless' for 8-col TSV."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            with caplog.at_level(logging.WARNING, logger="fragments_h5.fragments_h5"):
+                build_fragments_h5(
+                    tsv_fragment_file_8col,
+                    output,
+                    fasta_filename=fasta_file_path,
+                    set_mapq_255_to_none=True,
+                    num_processes=1,
+                )
+            assert not any("meaningless" in m for m in caplog.messages)
+
+    def test_set_mapq_255_warning_for_6col(
+        self, tsv_fragment_file, fasta_file_path, caplog
+    ):
+        """--set-mapq-255-to-none should warn 'meaningless' for 6-col TSV (no MAPQ)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "out.h5")
+            with caplog.at_level(logging.WARNING, logger="fragments_h5.fragments_h5"):
+                build_fragments_h5(
+                    tsv_fragment_file,
+                    output,
+                    fasta_filename=fasta_file_path,
+                    set_mapq_255_to_none=True,
+                    num_processes=1,
+                )
+            assert any("meaningless" in m for m in caplog.messages)
+
+
 class TestIsFragmentFile:
     def test_tsv_gz(self):
         assert is_fragment_file("frags.tsv.gz") is True

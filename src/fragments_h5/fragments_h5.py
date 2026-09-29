@@ -1111,12 +1111,10 @@ def build_fragments_h5(
             logger.warning("--se-max-fragment-length is meaningless for TSV/BED input; ignoring")
             se_max_fragment_length = None
         if min_mapq is not None:
-            logger.warning("--min-mapq flag is meaningless for TSV/BED input (no MAPQ in fragment files); ignoring")
+            logger.warning("--min-mapq flag is meaningless for TSV/BED input (filtering is a BAM-only operation); ignoring")
             min_mapq = None
         if include_duplicates:
             logger.warning("--include-duplicates flag is meaningless for TSV/BED input (no duplicate marking); ignoring")
-        if set_mapq_255_to_none:
-            logger.warning("--set-mapq-255-to-none flag is meaningless for TSV/BED input (no MAPQ in TSV); ignoring")
         if store_fragment_end_clipped:
             logger.warning("fragment_end_clipped is unavailable in TSV/BED input; forcing store_fragment_end_clipped=False")
             store_fragment_end_clipped = False
@@ -1124,11 +1122,24 @@ def build_fragments_h5(
         logger.info("Extracting contig names from tabix index")
         tsv_contigs, num_columns = scan_tsv_contigs(input_fname)
 
+        if num_columns == 7:
+            raise ValueError(
+                "7-column TSV/BED files are not supported. "
+                "MAPQ requires exactly two columns (mapq1, mapq2) after BED6. "
+                "Use 3-6 columns for no MAPQ, or 8 columns to include both mapq1 and mapq2."
+            )
+
         if num_columns < 6 and read_strand:
             logger.warning(
                 f"TSV/BED file has {num_columns} columns (strand requires 6 columns); forcing read_strand=False"
             )
             read_strand = False
+
+        if num_columns >= 8:
+            logger.info(f"TSV/BED file has {num_columns} columns; parsing MAPQ from columns 7-8")
+        elif set_mapq_255_to_none:
+            logger.warning("--set-mapq-255-to-none flag is meaningless for TSV/BED input without MAPQ columns; ignoring")
+            set_mapq_255_to_none = False
 
         bam_header_str = ""
         with pysam.FastaFile(fasta_filename) as fasta_fp:
