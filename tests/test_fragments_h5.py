@@ -394,6 +394,88 @@ def no_gc_h5_path(bam_path):
 
 
 @pytest.fixture(scope="module")
+def non_uniform_h5_path(many_contig_h5_path):
+    """A 30-contig h5 where each optional dataset exists on only SOME contigs.
+
+    The builder cannot produce this: it applies read_gc / read_strand / read_methyl /
+    store_fragment_end_clipped globally to every contig via SubBuildArgs, so every
+    builder-made file is uniform and `any()` and `all()` agree on it. That uniformity let
+    an `any()` -> `all()` mutant survive the whole suite, so the non-uniform file has to be
+    forged with raw h5py (the same tactic as two_bit_strand_h5_path).
+
+    This is the exact shape AGENT_CONTEXT.md 7.3 flags as a live, unfixed hazard: a file
+    with `gc` on some contigs but not others reports has_gc == True, and a consumer that
+    then iterates all contigs gets a KeyError. The tests below pin the CURRENT `any()`
+    semantics because this change is behaviour-preserving -- they do not assert that
+    `any()` is the right answer.
+    """
+    import h5py
+    import shutil
+
+    with tempfile.TemporaryDirectory() as dirname:
+        ofname = os.path.join(dirname, "non_uniform.frag.h5")
+        shutil.copy(many_contig_h5_path, ofname)
+        with h5py.File(ofname, "r+") as f:
+            contigs = sorted(f["data"].keys())
+            assert len(contigs) >= 3, "need several contigs for non-uniformity to exist"
+            first, second = contigs[0], contigs[1]
+            n_first = f["data"][first]["starts"].shape[0]
+
+            # present on exactly ONE contig -> any() True, all() False
+            f["data"][first].create_dataset(
+                "gc", data=numpy.zeros(n_first, dtype="uint8"), dtype="uint8"
+            )
+            f["data"][first].create_dataset(
+                "num_cpgs", data=numpy.zeros(n_first, dtype="uint8"), dtype="uint8"
+            )
+            f["data"][first].create_dataset(
+                "fragment_end_clipped",
+                data=numpy.zeros(n_first, dtype="uint8"),
+                dtype="uint8",
+            )
+            # strand exists on every contig from the build; remove it from one
+            # -> still any() True, but all() False
+            if "strand" in f["data"][second]:
+                del f["data"][second]["strand"]
+        yield ofname
+
+
+def test_has_properties_use_any_not_all_semantics(non_uniform_h5_path):
+    """On a non-uniform file all four must report True, i.e. any() not all().
+
+    This is the assertion that kills an `any()` -> `all()` mutant, which otherwise survives
+    the entire suite because every builder-produced fixture is uniform.
+
+    Pins current behaviour, which AGENT_CONTEXT.md 7.3 records as a known hazard rather
+    than a desirable design: a consumer trusting has_gc == True and then iterating every
+    contig will KeyError on the contigs that lack it. Switching to all() would be a real
+    behaviour change and needs its own decision -- it is not in scope for a caching change.
+    """
+    import h5py
+
+    with h5py.File(non_uniform_h5_path, "r") as f:
+        contigs = sorted(f["data"].keys())
+        n = len(contigs)
+        with_gc = sum("gc" in f["data"][c] for c in contigs)
+        with_strand = sum("strand" in f["data"][c] for c in contigs)
+
+    # the fixture is only meaningful if it is genuinely non-uniform
+    assert 0 < with_gc < n, f"gc on {with_gc}/{n} contigs; fixture is not non-uniform"
+    assert 0 < with_strand < n, f"strand on {with_strand}/{n} contigs; not non-uniform"
+
+    fh5 = FragmentsH5(non_uniform_h5_path)
+    try:
+        assert _actual_has_flags(fh5) == {
+            "has_methyl": True,
+            "has_strand": True,
+            "has_gc": True,
+            "has_fragment_end_clipped": True,
+        }
+    finally:
+        fh5.close()
+
+
+@pytest.fixture(scope="module")
 def methyl_h5_path():
     """A build with read_methyl=True, so `num_cpgs` exists -> has_methyl is True.
 
@@ -577,6 +659,19 @@ def test_has_methyl_differs_between_fixtures(methyl_h5_path, small_h5_path):
     """Pin that some fixture has has_methyl True, else an always-False mutant survives."""
     assert _reference_has_flags(methyl_h5_path)["has_methyl"] is True
     assert _reference_has_flags(small_h5_path)["has_methyl"] is False
+
+
+def test_has_fragment_end_clipped_differs_between_fixtures(
+    small_h5_path, many_contig_h5_path
+):
+    """Pin that some fixture has has_fragment_end_clipped False.
+
+    The spread was implicit (many_contig_h5_path builds with
+    store_fragment_end_clipped=False) but nothing asserted it, so a fixture change could
+    have silently removed the only False case and let a hardcoded mutant through.
+    """
+    assert _reference_has_flags(small_h5_path)["has_fragment_end_clipped"] is True
+    assert _reference_has_flags(many_contig_h5_path)["has_fragment_end_clipped"] is False
 
 
 def test_has_strand_differs_between_fixtures(
