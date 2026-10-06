@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
-**Last Updated:** 2026-08-25
-**Version:** 2.12.1
+**Last Updated:** 2026-10-06
+**Version:** 2.14.0
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -31,7 +31,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.12.1
+- **Version:** 2.14.0
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
@@ -243,10 +243,11 @@ class FragmentsH5:
     def fetch_counts(self, contig, region_start, region_stop):
         """Count fragments in region"""
         
-    # Properties: filename, name, has_methyl, has_strand,
-    #            has_fragment_end_clipped, max_fragment_length,
+    # Properties: filename, name, max_fragment_length,
     #            fragment_length_counts, n_fragments,
     #            build_argv, build_version, build_code_revision, source_format
+    # Cached properties (functools.cached_property — computed at most once per handle):
+    #            has_methyl, has_strand, has_gc, has_fragment_end_clipped
 ```
 
 **Build Functions:**
@@ -604,10 +605,16 @@ both defects. It is `--dry-run` by default and has **not been run against produc
 See `docs/architecture/gc_repair_tool.md` for details and
 `docs/architecture/gc_repair_tool_design.md` for the full design document.
 
-**`has_gc` uses `any()`** (`fragments_h5.py:363`): a file with `gc` on some contigs but
-not others reports `has_gc == True`, and a consumer iterating all contigs gets a
-`KeyError`. The same `any()` semantics apply to `has_strand`, `has_methyl`, and
-`has_fragment_end_clipped`. This is **live and unfixed**.
+**All four `has_*` properties use `any()` semantics** (`FragmentsH5.has_gc`,
+`has_strand`, `has_methyl`, `has_fragment_end_clipped`): a file with a dataset on some
+contigs but not others reports `True`, and a consumer iterating all contigs gets a
+`KeyError`. `fetch_array` consults `has_methyl` and `has_fragment_end_clipped` on every
+call (their `return_*` arguments default to `None`, meaning "ask the file"), so this is
+precisely the affected path. This is **live and unfixed**. Caching (`cached_property`,
+commit `7e13b47`) did not change the semantics — the answer is identical, merely computed
+once. The behaviour is now **pinned by `test_has_properties_use_any_not_all_semantics`**
+(using a forged non-uniform fixture), so switching to `all()` requires a deliberate test
+change.
 
 ### 7.4 Resolved Issues
 
@@ -889,7 +896,48 @@ Optimization: read_direct + contiguous arrays
 - Potential 2× speedup with memory-mapped arrays (not implemented)
 - Smaller max_frag_len improves query speed (~40% faster for 511 vs 65535)
 
-### 11.2 File Size Comparison
+### 11.2 `has_*` Property Caching (commit `7e13b47`)
+
+The four `has_*` properties (`has_methyl`, `has_strand`, `has_gc`,
+`has_fragment_end_clipped`) are `functools.cached_property`. On first access each walks
+contigs via `any(...)` and the result is stored in the instance `__dict__`.
+
+**`any()` short-circuits, so the four do not cost the same.** On a typical production file
+`has_gc` / `has_strand` / `has_fragment_end_clipped` are true at the *first* contig and stop
+there (measured: 1 `Group.__contains__` + 3 `Group.__getitem__`), while `has_methyl` is
+typically false and therefore walks all 195 contigs (195 + 195). That asymmetry is the whole
+reason per-flag laziness beat an eager combined scan — see the end of this section.
+
+**Measured on a 497 MB / 195-contig production h5, 300 per-region chr1 fetches:**
+
+| | before | after |
+|---|---|---|
+| wall, 300 fetches | 5.49–5.98 s | 1.20–1.33 s |
+| profiled total | 7.743 s / 3,074,102 calls | 1.420 s / 252,742 calls |
+| `has_methyl` | 300 calls, 6.369 s cumulative | 1 call, 0.231 s |
+| `h5py Group.__contains__` | 59,700 calls, 1.614 s tottime | 1,096 calls, 0.127 s |
+| `h5py Group.__getitem__` | 61,500 calls | 2,896 calls |
+| `read_direct` (actual data read) | 900 calls, 0.607 s | 900 calls, 0.580 s |
+
+**Scenario sweep (median):**
+
+| Scenario | before | after |
+|---|---|---|
+| open only | 20.0 ms | 21.0 ms |
+| open + `has_gc` only | 41 ms | 41.5 ms |
+| open + 1 fetch | 254 ms | 260 ms |
+| open + 10 fetches | 406 ms | 288 ms |
+| open + 300 fetches | 5360 ms | 1232 ms |
+
+No scenario regresses. The cost is dominated by `read_direct` after caching.
+
+An eager single-pass scan in `__init__` was tried first and **discarded as a measured
+regression** (open 20 → 256 ms; open + `has_gc` only 41 → 256 ms): a combined pass must
+resolve the worst-case flag and loses the per-flag short-circuit that `has_gc` /
+`has_strand` / `has_fragment_end_clipped` rely on (they are true at contig #1, while
+`has_methyl` is typically false and walks all 195).
+
+### 11.3 File Size Comparison
 
 **WGS BAM (chr10):**
 - Original BAM: ~1-5 GB (estimated)
@@ -1172,6 +1220,15 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 - Support CSI indexes (in addition to BAI)
 - Support alternative methylation tag formats
 
+**`has_*` as root-level h5 attributes (deferred):**
+- Write four boolean attributes at build time (`_has_gc`, `_has_methyl`, `_has_strand`,
+  `_has_fragment_end_clipped`), falling back to the current per-contig scan when absent.
+  This would make the eager-vs-lazy question, the pickle question, the post-close question,
+  and the 195-contig hot-path walk all moot, and would force the `any()`/`all()`
+  non-uniformity question to be answered explicitly at write time. Not pursued because it
+  changes the file format, touches the builder, and needs a migration path for existing
+  files.
+
 **Usability:**
 - Validate FASTA/BAM compatibility (contig names)
 - Add dry-run mode to estimate output size
@@ -1190,6 +1247,30 @@ GENOMIC_CHUNK_SIZE = 10000000 # 10M bases per parallelization chunk
 **Issues:** https://github.com/nboley/fragments_h5/issues
 
 ---
+
+### Unreleased (main, `7e13b47`..`1345661`)
+- **`has_*` property caching:** `has_methyl`, `has_strand`, `has_gc`, and
+  `has_fragment_end_clipped` changed from `@property` to `functools.cached_property`. The
+  `any(...)` bodies are byte-identical; each answer is now computed at most once per open
+  handle. Measured on a 497 MB / 195-contig production h5, 300 per-region chr1 fetches:
+  wall time 5.49–5.98 s → 1.20–1.33 s. `read_direct` (the actual data read) is unchanged
+  and now dominant.
+- **Pickle:** a computed answer survives a pickle round trip. `__getstate__` copies
+  `__dict__` and drops only `_f`/`index`/`data`, so a forked worker inherits the answer
+  instead of rescanning. Consistent with `contig_lengths` and `fragment_length_counts`.
+- **After `close()`:** an already-computed answer stays readable (describes file structure,
+  not handle liveness). An answer never computed still raises `ValueError`. This is a strict
+  relaxation — nothing that used to succeed now fails.
+- **`any()` semantics test-pinned:** `test_has_properties_use_any_not_all_semantics` (using
+  a forged non-uniform fixture) now pins the `any()` behaviour. Switching to `all()` requires
+  a deliberate test change. The `any()` hazard remains live and unfixed (see §7.3).
+- **Test coverage:** 20 new tests across the three commits (191 → 211 passed). Includes
+  mutation-derived fixtures (`no_strand_h5_path`, `two_bit_strand_h5_path`, `methyl_h5_path`,
+  `many_contig_h5_path`, `non_uniform_h5_path`), h5py access counting, pickle round-trip
+  verification, and fixture-diversity guards.
+- **Eager `__init__` scan discarded:** a single-pass scan over all contigs in `__init__` was
+  implemented and rejected as a measured regression (open 20 → 256 ms) because it loses the
+  per-flag short-circuit.
 
 ### Unreleased (worker-args-refactor branch, merged `9430e40`)
 - **`SubBuildArgs` replaces the 17-element positional worker-args tuple:** `build_sub_fragments_h5`
@@ -1261,6 +1342,6 @@ was the right fix.
 - **Single-process optimization:** When num_processes=1, work runs in-process without forking.
 - **Bug fix:** `contig_lengths` computation with `--contigs` filter was pairing contig names with wrong lengths.
 
-**Document Version:** 1.5
-**Last Updated:** 2026-08-25
+**Document Version:** 1.6
+**Last Updated:** 2026-10-06
 **Generated for:** Debugging and development assistance
