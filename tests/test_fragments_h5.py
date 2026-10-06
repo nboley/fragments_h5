@@ -351,6 +351,269 @@ def test_pickle_support(small_h5_path):
     fh5_restored.close()
 
 
+def _reference_has_flags(h5_path):
+    """Recompute the four structural flags straight from raw h5py.
+
+    Deliberately a transcription of the pre-cache `any(...)` expressions rather than a
+    call into FragmentsH5, so that these tests cannot pass by agreeing with the code
+    they are meant to check.
+    """
+    import h5py
+
+    with h5py.File(h5_path, "r") as f:
+        data = f["data"]
+        return {
+            "has_methyl": any("num_cpgs" in data[c] for c in data.keys()),
+            "has_strand": any(
+                ("strand" in data[c]) and (len(data[c]["strand"].shape) == 1)
+                for c in data.keys()
+            ),
+            "has_gc": any("gc" in data[c] for c in data.keys()),
+            "has_fragment_end_clipped": any(
+                "fragment_end_clipped" in data[c] for c in data.keys()
+            ),
+        }
+
+
+def _actual_has_flags(fh5):
+    return {
+        "has_methyl": fh5.has_methyl,
+        "has_strand": fh5.has_strand,
+        "has_gc": fh5.has_gc,
+        "has_fragment_end_clipped": fh5.has_fragment_end_clipped,
+    }
+
+
+@pytest.fixture(scope="module")
+def no_gc_h5_path(bam_path):
+    """A build with no --fasta, so `gc` is absent -> exercises the False branch."""
+    with tempfile.TemporaryDirectory() as dirname:
+        ofname = os.path.join(dirname, "no_gc.frag.h5")
+        build_fragments_h5(bam_path, ofname)
+        yield ofname
+
+
+@pytest.fixture(scope="module")
+def many_contig_h5_path():
+    """A fragment h5 spanning many contigs, so a per-contig scan is clearly visible.
+
+    Real production files have ~195 contigs (hg38 with alts/randoms); 30 is enough to
+    make a per-contig-per-access scan unmistakable while staying fast to build.
+    """
+    n_contigs = 30
+    contigs = [(f"chr{i}", 200_000) for i in range(1, n_contigs + 1)]
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": name, "LN": length} for name, length in contigs],
+    }
+    with tempfile.TemporaryDirectory() as dirname:
+        bam = os.path.join(dirname, "many_contig.bam")
+        seq_len, tlen = 10, 120
+        with pysam.AlignmentFile(bam, "wb", header=header) as outf:
+            for contig, _ in contigs:
+                tid = outf.get_tid(contig)
+                for i in range(5):
+                    pos1 = 1_000 + i * 1_000
+                    pos2 = pos1 + tlen - seq_len
+                    for flag, start, mate in (
+                        (0x1 | 0x2 | 0x20 | 0x40, pos1, pos2),
+                        (0x1 | 0x2 | 0x10 | 0x80, pos2, pos1),
+                    ):
+                        a = pysam.AlignedSegment()
+                        a.query_name = f"{contig}_read_{i}"
+                        a.reference_id = tid
+                        a.reference_start = start
+                        a.cigarstring = f"{seq_len}M"
+                        a.mapping_quality = 60
+                        a.query_sequence = "A" * seq_len
+                        a.query_qualities = pysam.qualitystring_to_array("I" * seq_len)
+                        a.flag = flag
+                        a.next_reference_id = tid
+                        a.next_reference_start = mate
+                        a.template_length = tlen if start == pos1 else -tlen
+                        outf.write(a)
+        pysam.sort("-o", bam, bam)
+        pysam.index(bam)
+
+        ofname = os.path.join(dirname, "many_contig.frag.h5")
+        build_fragments_h5(
+            bam, ofname, num_processes=1, read_strand=True,
+            store_fragment_end_clipped=False,
+        )
+        yield ofname
+
+
+@pytest.mark.parametrize(
+    "fixture_name", ["small_h5_path", "target_h5_path", "no_gc_h5_path", "many_contig_h5_path"]
+)
+def test_has_properties_match_independent_reference(request, fixture_name):
+    """Caching must not change what any has_* property returns."""
+    h5_path = request.getfixturevalue(fixture_name)
+    expected = _reference_has_flags(h5_path)
+
+    fh5 = FragmentsH5(h5_path)
+    try:
+        assert _actual_has_flags(fh5) == expected
+    finally:
+        fh5.close()
+
+
+def test_has_gc_differs_between_fixtures(small_h5_path, no_gc_h5_path):
+    """Guard that the parametrized test above spans both a True and a False gc case."""
+    assert _reference_has_flags(small_h5_path)["has_gc"] is True
+    assert _reference_has_flags(no_gc_h5_path)["has_gc"] is False
+
+
+def _count_h5py_group_access(monkeypatch):
+    """Count h5py Group __contains__/__getitem__ calls. Returns a mutable counter."""
+    import h5py
+
+    counts = {"contains": 0, "getitem": 0}
+    orig_contains = h5py.Group.__contains__
+    orig_getitem = h5py.Group.__getitem__
+
+    def counting_contains(self, key):
+        counts["contains"] += 1
+        return orig_contains(self, key)
+
+    def counting_getitem(self, key):
+        counts["getitem"] += 1
+        return orig_getitem(self, key)
+
+    monkeypatch.setattr(h5py.Group, "__contains__", counting_contains)
+    monkeypatch.setattr(h5py.Group, "__getitem__", counting_getitem)
+    return counts
+
+
+def test_has_properties_scan_once(small_h5_path, monkeypatch):
+    """The structural scan happens once per open handle, not once per access.
+
+    Before this was cached, each has_* access walked every contig, issuing one
+    Group.__contains__ and one Group.__getitem__ per contig per access. Now repeated
+    access must touch the HDF5 file zero additional times.
+    """
+    counts = _count_h5py_group_access(monkeypatch)
+
+    fh5 = FragmentsH5(small_h5_path)
+    try:
+        # first access resolves each answer; that one scan is the cost we are keeping
+        _actual_has_flags(fh5)
+        counts["contains"] = 0
+        counts["getitem"] = 0
+
+        for _ in range(25):
+            fh5.has_methyl
+            fh5.has_strand
+            fh5.has_gc
+            fh5.has_fragment_end_clipped
+
+        assert counts == {"contains": 0, "getitem": 0}, (
+            f"has_* properties re-scanned the h5 on access: {counts}"
+        )
+    finally:
+        fh5.close()
+
+
+def test_scan_cost_is_independent_of_access_count(many_contig_h5_path, monkeypatch):
+    """The scan cost must not scale with the number of accesses.
+
+    Uses a many-contig file, where the pre-cache cost was one Group.__contains__ plus
+    one Group.__getitem__ *per contig per access*. has_methyl is the worst case: it is
+    False here, so `any()` could not short-circuit and walked every contig every time.
+    """
+    import h5py
+
+    with h5py.File(many_contig_h5_path, "r") as f:
+        n_contigs = len(f["data"].keys())
+    assert n_contigs >= 20, f"fixture only has {n_contigs} contigs; test would be weak"
+
+    fh5 = FragmentsH5(many_contig_h5_path)
+    try:
+        assert fh5.has_methyl is False, "has_methyl must be the non-short-circuiting case"
+
+        counts = _count_h5py_group_access(monkeypatch)
+        for _ in range(40):
+            fh5.has_methyl
+        assert counts == {"contains": 0, "getitem": 0}, (
+            f"40 has_methyl accesses on a {n_contigs}-contig file cost {counts}; "
+            f"the pre-cache code would have cost ~{40 * n_contigs} of each"
+        )
+    finally:
+        fh5.close()
+
+
+def test_has_properties_survive_pickle(many_contig_h5_path, monkeypatch):
+    """Unpickling reopens the same filename, so the cached answers stay valid.
+
+    They are carried in __dict__ by __getstate__ on purpose: a forked worker should
+    inherit them rather than redo the scan. Uses the many-contig fixture so that a
+    rescan (~one Group.__contains__ per contig) is distinguishable from __setstate__'s
+    two unavoidable reopen lookups ( _f["index"] and _f["data"] ).
+    """
+    import pickle
+    import h5py
+
+    with h5py.File(many_contig_h5_path, "r") as f:
+        n_contigs = len(f["data"].keys())
+
+    expected = _reference_has_flags(many_contig_h5_path)
+
+    fh5 = FragmentsH5(many_contig_h5_path)
+    _actual_has_flags(fh5)  # resolve before pickling, so the answers are in __dict__
+    pickled = pickle.dumps(fh5)
+    fh5.close()
+
+    counts = _count_h5py_group_access(monkeypatch)
+    restored = pickle.loads(pickled)
+    try:
+        assert _actual_has_flags(restored) == expected
+        # a structural rescan would cost one __contains__ per contig; reopening costs none
+        assert counts["contains"] == 0, (
+            f"unpickling re-scanned the h5 structure: {counts} "
+            f"(a rescan of {n_contigs} contigs is what this rules out)"
+        )
+        assert counts["getitem"] < n_contigs, (
+            f"unpickling issued {counts['getitem']} group lookups on a "
+            f"{n_contigs}-contig file; expected only __setstate__'s reopen"
+        )
+    finally:
+        restored.close()
+
+
+def test_resolved_has_properties_outlive_close(small_h5_path):
+    """An answer computed while open stays readable after close().
+
+    It describes the file's structure, not the liveness of the handle -- the same
+    reason contig_lengths / max_fragment_length / n_fragments are readable after
+    close(). This is the one behavioural change: pre-cache, every post-close access
+    raised ValueError("Invalid group (or file) id").
+    """
+    expected = _reference_has_flags(small_h5_path)
+
+    fh5 = FragmentsH5(small_h5_path)
+    resolved = _actual_has_flags(fh5)
+    fh5.close()
+
+    assert _actual_has_flags(fh5) == resolved == expected
+    # the metadata whose post-close behaviour this now matches
+    assert fh5.contig_lengths["chr6"] > 0
+    assert fh5.n_fragments > 0
+
+
+def test_unresolved_has_property_after_close_still_raises(small_h5_path):
+    """A never-computed answer still raises on a dead handle, as it always did.
+
+    Pins the limit of the change: caching only relaxes post-close behaviour for
+    answers already known. It never makes a previously-working access fail, and it
+    does not resurrect a dead handle.
+    """
+    fh5 = FragmentsH5(small_h5_path)
+    fh5.close()
+
+    with pytest.raises(ValueError, match="Invalid group"):
+        fh5.has_methyl
+
+
 def test_include_duplicates(duplicates_bam_path, fasta_file_path):
     """Test that include_duplicates parameter correctly includes/excludes duplicate-marked fragments."""
     with tempfile.TemporaryDirectory() as tmpdir:

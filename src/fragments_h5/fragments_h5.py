@@ -148,6 +148,7 @@ import signal
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Optional
 
 import h5py
@@ -413,13 +414,38 @@ class FragmentsH5:
         self.__dict__['index'] = self.__dict__['_f']["index"]
         self.__dict__['data'] = self.__dict__['_f']["data"]
 
-    @property
+    # The four has_* answers below are pure functions of the file's structure, but
+    # scanning for them is not free: on a 195-contig production file, one has_methyl
+    # access cost 195 h5py group lookups plus 195 membership tests, and fetch_array
+    # consults has_methyl and has_fragment_end_clipped on every call. So they are
+    # cached_property rather than property: computed at most once per handle.
+    #
+    # Why this is safe to cache for the life of the handle: nothing adds or removes a
+    # per-contig dataset while a FragmentsH5 is open. The only writers are the repair
+    # tool and the builder's fragment-length-counts step, and both do their structural
+    # work on a raw h5py handle, constructing a FragmentsH5 only afterwards; the one
+    # dataset either mutates through an instance is the root-level
+    # fragment_length_counts, which none of these properties look at.
+    #
+    # Pickling: cached_property stores into the instance __dict__, which __getstate__
+    # copies wholesale (it drops only _f/index/data). So a computed answer rides
+    # through the pickle, and that is what we want -- __setstate__ reopens the same
+    # _f_fname, so the structure is identical and a forked worker inherits the answer
+    # instead of rescanning. This matches contig_lengths and fragment_length_counts,
+    # which are already snapshotted in __init__ and already survive the round trip.
+    #
+    # After close(): an answer already computed stays readable, because it describes
+    # the file's structure rather than the liveness of the handle. An answer never
+    # computed still raises on a dead handle, exactly as all four did before. That is
+    # a strict relaxation -- nothing that used to succeed now fails.
+
+    @cached_property
     def has_methyl(self):
         return any(
             "num_cpgs" in self.data[contig] for contig in self.data.keys()
         )
 
-    @property
+    @cached_property
     def has_strand(self):
         # A long time ago, Artur (@beyondtheproof) messed up and made fragment h5s for the "small frag" assay
         # with strand taking up two bits. The thought was that one bit would signify "+", the other "-", and if
@@ -431,13 +457,13 @@ class FragmentsH5:
             for contig in self.data.keys()
         )
 
-    @property
+    @cached_property
     def has_gc(self):
         return any(
             "gc" in self.data[contig] for contig in self.data.keys()
         )
 
-    @property
+    @cached_property
     def has_fragment_end_clipped(self):
         return any(
             "fragment_end_clipped" in self.data[contig]
