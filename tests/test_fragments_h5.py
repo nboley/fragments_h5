@@ -782,6 +782,64 @@ def test_scan_cost_is_independent_of_access_count(many_contig_h5_path, monkeypat
         fh5.close()
 
 
+def test_first_scan_short_circuits_per_flag(many_contig_h5_path, monkeypatch):
+    """Each flag must stop at the first contig that settles it.
+
+    This bounds the cost of the FIRST scan. Every other caching test installs its
+    counters *after* the answer is already cached, so none of them can tell a
+    short-circuiting scan from a full walk. That gap was real: wrapping the generator
+    in a list -- `any([...])` instead of `any(...)` -- returns the identical value for
+    every file while visiting every contig, and passed all 20 other tests.
+
+    The per-flag short-circuit is the whole reason this is `cached_property` per flag
+    rather than one eager scan in `__init__`. An eager combined pass has to resolve the
+    worst-case flag, which measured 20 -> 256 ms at open on a 195-contig file. A mutant
+    that silently removes the short-circuit re-creates that regression with no failing
+    test, so the cost asymmetry needs pinning directly.
+
+    On this fixture `strand` is present on every contig, so `has_strand` settles True at
+    contig #1. `num_cpgs` is absent everywhere, so `has_methyl` can only settle False by
+    visiting all of them. The gap between those two costs IS the short-circuit.
+    """
+    import h5py
+
+    with h5py.File(many_contig_h5_path, "r") as f:
+        n_contigs = len(f["data"].keys())
+    assert n_contigs >= 20, f"fixture has only {n_contigs} contigs; test would be weak"
+
+    counts = _count_h5py_group_access(monkeypatch)
+
+    # has_strand is True at the first contig, so it must not walk the file.
+    fh5 = FragmentsH5(many_contig_h5_path)
+    try:
+        counts["contains"] = 0
+        assert fh5.has_strand is True
+        short_circuit_cost = counts["contains"]
+    finally:
+        fh5.close()
+
+    # has_methyl is False everywhere, so it has no choice but to visit every contig.
+    fh5 = FragmentsH5(many_contig_h5_path)
+    try:
+        counts["contains"] = 0
+        assert fh5.has_methyl is False
+        full_walk_cost = counts["contains"]
+    finally:
+        fh5.close()
+
+    assert short_circuit_cost <= 2, (
+        f"has_strand cost {short_circuit_cost} Group.__contains__ calls on a "
+        f"{n_contigs}-contig file, but it is True at contig #1 and must stop there. "
+        f"`any([...])` in place of `any(...)` produces exactly this symptom: same "
+        f"return value, every contig visited."
+    )
+    assert full_walk_cost >= n_contigs, (
+        f"has_methyl cost only {full_walk_cost} calls; it is False on every contig "
+        f"and must therefore visit all {n_contigs} of them. A cost below that means "
+        f"it is not really scanning."
+    )
+
+
 def test_has_properties_survive_pickle(many_contig_h5_path, monkeypatch):
     """Unpickling reopens the same filename, so the cached answers stay valid.
 
