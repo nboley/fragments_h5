@@ -394,6 +394,100 @@ def no_gc_h5_path(bam_path):
 
 
 @pytest.fixture(scope="module")
+def methyl_h5_path():
+    """A build with read_methyl=True, so `num_cpgs` exists -> has_methyl is True.
+
+    Without this, every fixture has has_methyl == False, and a mutant that walks the
+    contigs but ignores `num_cpgs` (`any(False for contig in ...)`) passes the whole
+    suite. Methylation comes from the YM tag, whose format is fixed by
+    MethylCounts.init_from_ym_tag in fragment.py.
+    """
+    ym = (
+        "unconverted_cytosines:3;converted_cytosines:7;"
+        "unconverted_cpgs:2;converted_cpgs:5"
+    )
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": "chr1", "LN": 200_000}],
+    }
+    with tempfile.TemporaryDirectory() as dirname:
+        bam = os.path.join(dirname, "methyl.bam")
+        seq_len, tlen = 10, 120
+        with pysam.AlignmentFile(bam, "wb", header=header) as outf:
+            for i in range(5):
+                pos1 = 1_000 + i * 1_000
+                pos2 = pos1 + tlen - seq_len
+                for flag, start, mate, tl in (
+                    (0x1 | 0x2 | 0x20 | 0x40, pos1, pos2, tlen),
+                    (0x1 | 0x2 | 0x10 | 0x80, pos2, pos1, -tlen),
+                ):
+                    a = pysam.AlignedSegment()
+                    a.query_name = f"methyl_read_{i}"
+                    a.reference_id = 0
+                    a.reference_start = start
+                    a.cigarstring = f"{seq_len}M"
+                    a.mapping_quality = 60
+                    a.query_sequence = "A" * seq_len
+                    a.query_qualities = pysam.qualitystring_to_array("I" * seq_len)
+                    a.flag = flag
+                    a.next_reference_id = 0
+                    a.next_reference_start = mate
+                    a.template_length = tl
+                    a.set_tag("YM", ym)
+                    outf.write(a)
+        pysam.sort("-o", bam, bam)
+        pysam.index(bam)
+
+        ofname = os.path.join(dirname, "methyl.frag.h5")
+        build_fragments_h5(
+            bam, ofname, num_processes=1, read_strand=True, read_methyl=True,
+            store_fragment_end_clipped=False,
+        )
+        yield ofname
+
+
+@pytest.fixture(scope="module")
+def no_strand_h5_path(bam_path):
+    """A build with read_strand=False, so `strand` is absent -> has_strand is False.
+
+    Without this, every fixture has has_strand == True and an `any(True for ...)` mutant
+    survives the suite.
+    """
+    with tempfile.TemporaryDirectory() as dirname:
+        ofname = os.path.join(dirname, "no_strand.frag.h5")
+        build_fragments_h5(bam_path, ofname, read_strand=False)
+        yield ofname
+
+
+@pytest.fixture(scope="module")
+def two_bit_strand_h5_path(bam_path):
+    """A build whose `strand` dataset is 2-D, which must read as has_strand == False.
+
+    This is the only non-trivial logic in has_strand: the `len(shape) == 1` guard exists
+    because some very old "small frag" h5s stored strand in two bits. No fixture
+    exercised that guard, so a mutant ignoring it survived. Built normally, then the
+    strand dataset is replaced with a 2-column one via raw h5py -- the builder cannot
+    produce this shape any more, which is exactly why it has to be forged here.
+    """
+    import h5py
+
+    with tempfile.TemporaryDirectory() as dirname:
+        ofname = os.path.join(dirname, "two_bit_strand.frag.h5")
+        build_fragments_h5(bam_path, ofname, read_strand=True)
+        with h5py.File(ofname, "r+") as f:
+            for contig in f["data"]:
+                grp = f["data"][contig]
+                if "strand" not in grp:
+                    continue
+                n = grp["strand"].shape[0]
+                del grp["strand"]
+                grp.create_dataset(
+                    "strand", data=numpy.zeros((n, 2), dtype="uint8"), dtype="uint8"
+                )
+        yield ofname
+
+
+@pytest.fixture(scope="module")
 def many_contig_h5_path():
     """A fragment h5 spanning many contigs, so a per-contig scan is clearly visible.
 
@@ -444,7 +538,16 @@ def many_contig_h5_path():
 
 
 @pytest.mark.parametrize(
-    "fixture_name", ["small_h5_path", "target_h5_path", "no_gc_h5_path", "many_contig_h5_path"]
+    "fixture_name",
+    [
+        "small_h5_path",
+        "target_h5_path",
+        "no_gc_h5_path",
+        "many_contig_h5_path",
+        "methyl_h5_path",
+        "no_strand_h5_path",
+        "two_bit_strand_h5_path",
+    ],
 )
 def test_has_properties_match_independent_reference(request, fixture_name):
     """Caching must not change what any has_* property returns."""
@@ -458,19 +561,52 @@ def test_has_properties_match_independent_reference(request, fixture_name):
         fh5.close()
 
 
+# The three guards below exist because a value test is only as strong as its fixtures'
+# disagreement. Each flag needs at least one True and one False fixture, or a mutant that
+# hardcodes the majority answer passes every assertion. Two such mutants were found by
+# executing them: `has_methyl -> any(False for ...)` and `has_strand -> any(True for ...)`.
+
+
 def test_has_gc_differs_between_fixtures(small_h5_path, no_gc_h5_path):
     """Guard that the parametrized test above spans both a True and a False gc case."""
     assert _reference_has_flags(small_h5_path)["has_gc"] is True
     assert _reference_has_flags(no_gc_h5_path)["has_gc"] is False
 
 
+def test_has_methyl_differs_between_fixtures(methyl_h5_path, small_h5_path):
+    """Pin that some fixture has has_methyl True, else an always-False mutant survives."""
+    assert _reference_has_flags(methyl_h5_path)["has_methyl"] is True
+    assert _reference_has_flags(small_h5_path)["has_methyl"] is False
+
+
+def test_has_strand_differs_between_fixtures(
+    small_h5_path, no_strand_h5_path, two_bit_strand_h5_path
+):
+    """Pin that some fixture has has_strand False, else an always-True mutant survives.
+
+    Covers both False routes: strand absent entirely, and strand present but 2-D (the
+    legacy two-bit layout the `len(shape) == 1` guard exists for).
+    """
+    assert _reference_has_flags(small_h5_path)["has_strand"] is True
+    assert _reference_has_flags(no_strand_h5_path)["has_strand"] is False
+    assert _reference_has_flags(two_bit_strand_h5_path)["has_strand"] is False
+
+
 def _count_h5py_group_access(monkeypatch):
-    """Count h5py Group __contains__/__getitem__ calls. Returns a mutable counter."""
+    """Count h5py Group lookups. Returns a mutable counter.
+
+    `get` and `keys` are counted as well as `__contains__`/`__getitem__`: patching only
+    the dunders leaves `Group.get()` as a silent route to the file, so an implementation
+    using `.get()` would read as zero accesses. The counter should be hard to evade, not
+    merely sufficient for the current implementation.
+    """
     import h5py
 
-    counts = {"contains": 0, "getitem": 0}
+    counts = {"contains": 0, "getitem": 0, "get": 0, "keys": 0}
     orig_contains = h5py.Group.__contains__
     orig_getitem = h5py.Group.__getitem__
+    orig_get = h5py.Group.get
+    orig_keys = h5py.Group.keys
 
     def counting_contains(self, key):
         counts["contains"] += 1
@@ -480,8 +616,18 @@ def _count_h5py_group_access(monkeypatch):
         counts["getitem"] += 1
         return orig_getitem(self, key)
 
+    def counting_get(self, key, *args, **kwargs):
+        counts["get"] += 1
+        return orig_get(self, key, *args, **kwargs)
+
+    def counting_keys(self):
+        counts["keys"] += 1
+        return orig_keys(self)
+
     monkeypatch.setattr(h5py.Group, "__contains__", counting_contains)
     monkeypatch.setattr(h5py.Group, "__getitem__", counting_getitem)
+    monkeypatch.setattr(h5py.Group, "get", counting_get)
+    monkeypatch.setattr(h5py.Group, "keys", counting_keys)
     return counts
 
 
@@ -498,8 +644,7 @@ def test_has_properties_scan_once(small_h5_path, monkeypatch):
     try:
         # first access resolves each answer; that one scan is the cost we are keeping
         _actual_has_flags(fh5)
-        counts["contains"] = 0
-        counts["getitem"] = 0
+        counts.update(dict.fromkeys(counts, 0))
 
         for _ in range(25):
             fh5.has_methyl
@@ -507,7 +652,7 @@ def test_has_properties_scan_once(small_h5_path, monkeypatch):
             fh5.has_gc
             fh5.has_fragment_end_clipped
 
-        assert counts == {"contains": 0, "getitem": 0}, (
+        assert all(v == 0 for v in counts.values()), (
             f"has_* properties re-scanned the h5 on access: {counts}"
         )
     finally:
@@ -534,7 +679,7 @@ def test_scan_cost_is_independent_of_access_count(many_contig_h5_path, monkeypat
         counts = _count_h5py_group_access(monkeypatch)
         for _ in range(40):
             fh5.has_methyl
-        assert counts == {"contains": 0, "getitem": 0}, (
+        assert all(v == 0 for v in counts.values()), (
             f"40 has_methyl accesses on a {n_contigs}-contig file cost {counts}; "
             f"the pre-cache code would have cost ~{40 * n_contigs} of each"
         )
@@ -572,9 +717,14 @@ def test_has_properties_survive_pickle(many_contig_h5_path, monkeypatch):
             f"unpickling re-scanned the h5 structure: {counts} "
             f"(a rescan of {n_contigs} contigs is what this rules out)"
         )
-        assert counts["getitem"] < n_contigs, (
-            f"unpickling issued {counts['getitem']} group lookups on a "
-            f"{n_contigs}-contig file; expected only __setstate__'s reopen"
+        # __setstate__ costs exactly two lookups: _f["index"] and _f["data"]. Bounding at
+        # n_contigs instead would still admit a partial rescan of a short-circuiting flag.
+        assert counts["getitem"] <= 2, (
+            f"unpickling issued {counts['getitem']} group lookups; __setstate__ needs "
+            f'exactly 2 (_f["index"], _f["data"]). Full counts: {counts}'
+        )
+        assert counts["get"] == 0 and counts["keys"] == 0, (
+            f"unpickling reached the file by get()/keys(): {counts}"
         )
     finally:
         restored.close()
@@ -600,18 +750,25 @@ def test_resolved_has_properties_outlive_close(small_h5_path):
     assert fh5.n_fragments > 0
 
 
-def test_unresolved_has_property_after_close_still_raises(small_h5_path):
+@pytest.mark.parametrize(
+    "prop_name", ["has_methyl", "has_strand", "has_gc", "has_fragment_end_clipped"]
+)
+def test_unresolved_has_property_after_close_still_raises(small_h5_path, prop_name):
     """A never-computed answer still raises on a dead handle, as it always did.
 
     Pins the limit of the change: caching only relaxes post-close behaviour for
     answers already known. It never makes a previously-working access fail, and it
     does not resurrect a dead handle.
+
+    This also happens to be the assertion that kills a naive `return False` mutant --
+    such a mutant never touches the file, so it answers on a dead handle instead of
+    raising. Parametrized over all four so that holds for each of them.
     """
     fh5 = FragmentsH5(small_h5_path)
     fh5.close()
 
     with pytest.raises(ValueError, match="Invalid group"):
-        fh5.has_methyl
+        getattr(fh5, prop_name)
 
 
 def test_include_duplicates(duplicates_bam_path, fasta_file_path):

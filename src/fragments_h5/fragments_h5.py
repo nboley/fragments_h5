@@ -424,7 +424,7 @@ class FragmentsH5:
     # per-contig dataset while a FragmentsH5 is open. The only writers are the repair
     # tool and the builder's fragment-length-counts step, and both do their structural
     # work on a raw h5py handle, constructing a FragmentsH5 only afterwards; the one
-    # dataset either mutates through an instance is the root-level
+    # dataset either of them mutates through an instance is the root-level
     # fragment_length_counts, which none of these properties look at.
     #
     # Pickling: cached_property stores into the instance __dict__, which __getstate__
