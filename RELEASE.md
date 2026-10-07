@@ -9,7 +9,10 @@ This guide explains how to build and push Docker images and packages after makin
    ```bash
    gh auth login
    ```
-3. **Conda** installed (for conda package builds)
+
+Conda packaging was **retired 2026-10-07**. The `conda-build` / `conda` / `conda-login`
+Makefile targets and this guide's conda sections are gone. Docker + git tag are the only
+release artifacts.
 
 ## Current Version
 
@@ -212,97 +215,92 @@ v2.10.1 image/tag mismatch.
 - Multiprocessing start method: `forkserver` → `fork`
 - Updated documentation to explain fork safety
 
-## Building and Pushing Docker Image
+## Complete Release Workflow
 
-The Docker image will be pushed to `ghcr.io/nboley/fragments-h5:2.11.0` and `ghcr.io/nboley/fragments-h5:latest`.
+**Tag first, then build the image. The order is not cosmetic.**
 
-### Quick Command
 ```bash
-cd /home/nathanboley/src/fragments_h5
-make push
+# 1. Commit the version bump in pyproject.toml (nothing below will run otherwise)
+# 2. Create and push the git tag
+make tag
+
+# 3. Build and push the Docker image
+make docker-push
+
+# 4. Verify by RUNNING the image -- see Verification below
 ```
 
-This will:
-1. Build the Docker image locally
-2. Authenticate with GHCR using GitHub CLI
-3. Tag the image with version and `latest`
-4. Push both tags to GHCR
+Or in one step, which orders this correctly for you:
+```bash
+make all   # = login tag docker clean
+```
 
-### Step-by-Step
+### Why tag before build
 
-1. **Build Docker image:**
-   ```bash
-   make docker
-   ```
-   This creates: `fragments-h5:2.7.0` and `fragments-h5:latest`
+`docker-build` bakes `BUILD_CODE_REVISION` from
+`git describe --tags --always --dirty`. If you build *before* tagging, the newest tag
+reachable is the *previous* release, so an image labelled `2.15.0` self-reports
+`v2.14.0-7-gcb6be7a`. The artifact then disagrees with its own label — which is exactly
+how `v2.10.1` went wrong (see the correction note in the changelog above).
 
-2. **Push to GHCR:**
-   ```bash
-   make push
-   ```
-   This authenticates, tags, and pushes to `ghcr.io/nboley/fragments-h5:2.11.0`
+Tag first and `git describe` returns `v2.15.0`, so the image reports precisely the release
+it is. Verified on the v2.15.0 release: baked revision `v2.15.0`.
+
+Earlier revisions of this guide instructed docker-then-tag. That was wrong, and the
+Makefile's own `all` target always disagreed with it.
+
+## Building and Pushing the Docker Image
+
+Images are pushed to `ghcr.io/$(GITHUB_USER)/fragments-h5:$(VERSION)` and `:latest`, where
+`VERSION` comes from `pyproject.toml`.
+
+```bash
+make docker-build   # build locally only
+make docker-push    # build, authenticate to GHCR via `gh auth token`, tag, push
+make docker         # both of the above
+```
+
+There is **no `make push` target**. Earlier versions of this guide told you to run it;
+it never existed.
 
 ### Custom Configuration
 
-Override defaults with environment variables:
 ```bash
-GITHUB_USER=your-org make push  # Use different GitHub org/user
-VERSION=2.6.0 make push         # Override version (defaults to pyproject.toml)
+GITHUB_USER=your-org make docker-push   # different GitHub org/user
+VERSION=2.6.0 make docker-push          # override version (default: pyproject.toml)
 ```
 
-## Building Conda Package
+## Creating the Git Tag
 
-### Build Only
-```bash
-make conda
-```
-Output: `conda-build-output/`
-
-### Build and Upload to JFrog (if configured)
-```bash
-./scripts/build_conda_package.sh --upload
-```
-
-Requires environment variables:
-- `JFROG_URL` - Artifactory URL
-- `JFROG_REPO` - Repository name
-- `JFROG_ACCESS_TOKEN` or `JFROG_USER`/`JFROG_PASSWORD`
-
-## Creating Git Tag
-
-After building and pushing, create a git tag:
 ```bash
 make tag
 ```
 
-This creates and pushes tag `v2.5.0` to the repository.
+Creates and pushes `v$(VERSION)`. It refuses to run if the tag already exists, if
+`pyproject.toml` is uncommitted (`check-pyproject-clean`), or if the tree has any tracked
+change or untracked file (`require-clean-tree`). Those guards are what stop a tag from
+pointing at a commit that declares a different version — the `v2.10.1` failure.
 
-## Complete Release Workflow
-
-To do everything at once:
-```bash
-# 1. Build conda package
-make conda
-
-# 2. Build and push Docker image
-make push
-
-# 3. Create and push git tag
-make tag
-```
-
-Or use the `all` target (builds conda + docker + push, but not tag):
-```bash
-make all
-make tag  # Still need to tag separately
-```
+An untracked file from an unrelated session is enough to block this. Commit it, stash it,
+or gitignore it; do not work around the gate.
 
 ## Verification
 
 After pushing, verify the Docker image:
 ```bash
-docker pull ghcr.io/nboley/fragments-h5:2.11.0
-docker run --rm ghcr.io/nboley/fragments-h5:2.11.0 build-fragments-h5 --help
+VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+# pull FRESH, so you test what is in the registry and not your local build cache
+docker rmi ghcr.io/nboley/fragments-h5:$VERSION 2>/dev/null
+docker pull ghcr.io/nboley/fragments-h5:$VERSION
+docker run --rm ghcr.io/nboley/fragments-h5:$VERSION build-fragments-h5 --help
+
+# and confirm the image contains the code it claims to:
+docker run --rm ghcr.io/nboley/fragments-h5:$VERSION python -c "
+import importlib.metadata as md
+import fragments_h5._build_revision as br
+print('dist version  :', md.version('fragments_h5'))
+print('baked revision:', br.BUILD_CODE_REVISION)"
 ```
 
 This is not optional flourish: an image can be built from a tree ahead of its
@@ -312,5 +310,16 @@ evidence — confirm what a container contains by running it.
 ## Troubleshooting
 
 - **Docker push fails**: Ensure `gh auth login` is completed
-- **Version mismatch**: `pyproject.toml` is the single source of truth — the conda recipe receives the version at build time via `--variant pkg_version=$(VERSION)`, and all artifact-producing targets (`conda-build`, `docker-build`, `tag`) depend on `require-clean-tree`, which refuses to proceed when the working tree has tracked or untracked changes. `tag` additionally has a `check-pyproject-clean` prerequisite with a tailored diagnostic. Verify after tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
-- **Conda build fails**: Ensure conda-forge and bioconda channels are available
+- **Version mismatch**: `pyproject.toml` is the single source of truth. Both
+  artifact-producing targets (`docker-build`, `tag`) depend on `require-clean-tree`, which
+  refuses to proceed when the tree has tracked changes or untracked files. `tag`
+  additionally has `check-pyproject-clean` with a tailored diagnostic. Verify after
+  tagging: `git show v<VERSION>:pyproject.toml | grep '^version'`.
+- **Version appears in more than one place**: `pyproject.toml` owns it, but
+  `AGENT_CONTEXT.md` carries two hand-copied `**Version:**` lines and this guide's
+  "Current Version" line is a third copy. They rot — that line sat at `2.12.1` from before
+  v2.13.0 until v2.15.0. Update all of them, or trust only `pyproject.toml`.
+- **`require-clean-tree` blocks on a file you did not create**: on a shared host another
+  session may leave an untracked file in the tree. Commit it, stash it, or gitignore it.
+  Do not bypass the gate — it is the only thing preventing an artifact from disagreeing
+  with the commit it claims to be built from.

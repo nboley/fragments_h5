@@ -34,8 +34,8 @@
 - **Version:** 2.15.0
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
-- **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
-- **Deployment:** GHCR (Docker), JFrog Artifactory (conda)
+- **Build System:** pip (setuptools + Cython), Docker
+- **Deployment:** GHCR (Docker) + git tag. **Conda packaging retired 2026-10-07**
 
 ---
 
@@ -370,7 +370,8 @@ def one_hot_encode_sequences(sequences: list[str]) -> np.ndarray:
 
 **Development:**
 - `pytest`, `pytest-timeout` - Testing framework
-- `rattler-build` - Conda package builds
+- (`rattler-build` was listed here for conda package builds; conda retired 2026-10-07, and
+  it was never installed on the dev host)
 
 ### 4.2 Build Systems
 
@@ -389,29 +390,21 @@ pip install dist/fragments_h5-*.whl
 1. `setup.py` builds Cython extension `fragments_h5.sequence` from `sequence.pyx`
 2. `setuptools` packages wheel with compiled extension
 
-#### Conda (JFrog Artifactory)
+#### Conda — RETIRED 2026-10-07
 
-```bash
-# Build conda package
-make conda-build
-# or
-rattler-build build \
-    --recipe conda-recipe/recipe.yaml \
-    --output-dir conda-build-output \
-    --channel conda-forge \
-    --channel bioconda \
-    --variant-config conda-recipe/variant_config.yaml
+Conda packaging is no longer used. The `conda-build` / `conda` / `conda-login` Makefile
+targets are deleted, and the conda sections of `RELEASE.md` are gone. Docker + git tag are
+the only release artifacts.
 
-# Publish to JFrog
-make conda-publish
-# or
-./scripts/publish_conda_package.sh
-```
+`conda-recipe/` and `scripts/{build,publish}_conda_package.sh` may still be on disk; they
+are unreferenced. `rattler-build` is not installed on the dev host, so these could not run
+even before retirement — the v2.14.0 release skipped conda for that reason.
 
-**Conda Recipe:** `conda-recipe/recipe.yaml`
-- Platform: linux-64
-- Python: 3.13 (variant_config.yaml), 3.10-3.13 (conda_build_config.yaml)
-- Build: `python setup.py build_ext --inplace && pip install .`
+Two defects were found in the release machinery while retiring this (both now fixed):
+`login` depended on a `conda-login` target that **never existed**, and because make treats
+an unimplemented `.PHONY` prerequisite as satisfied, `make login` skipped the conda check
+and still printed "✓ All credentials verified successfully!". Separately, `RELEASE.md`
+instructed `make push`, which is not a target.
 
 #### Docker (GHCR)
 
@@ -438,15 +431,13 @@ make docker
 
 | Target | Description |
 |--------|-------------|
-| `require-clean-tree` | Whole-tree cleanliness gate (tracked + untracked); prerequisite of `conda-build`, `docker-build`, `tag` |
-| `conda-build` | Build conda package with rattler-build (requires clean tree) |
-| `conda-publish` | Upload to JFrog Artifactory (requires credentials) |
-| `conda` | Build + publish conda |
+| `require-clean-tree` | Whole-tree cleanliness gate (tracked + untracked); prerequisite of `docker-build` and `tag` |
 | `docker-build` | Build Docker image (requires clean tree; bakes `git describe` via `--build-arg`) |
 | `docker-push` | Push to GHCR (requires gh auth) |
 | `docker` | Build + push Docker |
 | `tag` | Create and push git tag v$(VERSION) (requires clean tree + uncommitted pyproject.toml check) |
-| `all` | conda + docker + tag + clean |
+| `all` | `login tag docker clean` — **tag precedes docker deliberately**; building first bakes `v<prev>-N-g<sha>` into an image labelled with the new version |
+| `login` | Verify GHCR auth (was `conda-login docker-login`; `conda-login` never existed) |
 | `clean` | Remove build artifacts |
 
 ---
@@ -626,10 +617,11 @@ change.
 
 ### 7.5 Build System Quirks
 
-**rattler-build Cleanup:**
-- rattler-build may exit with non-zero status during cleanup even when build succeeds
-- Makefile checks for presence of `.conda` files to determine success
-- Known rattler-build issue, does not affect package quality
+**rattler-build Cleanup (no longer applicable — conda retired 2026-10-07):**
+- rattler-build could exit non-zero during cleanup even when the build succeeded, so the
+  Makefile checked for `.conda` files to decide success. Both the target and that
+  workaround are deleted. Kept here only so the behaviour is recognisable if anyone
+  revives conda packaging.
 
 **Cython Compilation:**
 - `sequence.c` generated from `sequence.pyx` during build
@@ -823,45 +815,50 @@ remaining value that must be set to match.
 
 **Standard Release:**
 ```bash
-# 1. Update version in pyproject.toml
-vim pyproject.toml
+# 1. Update version in pyproject.toml, and COMMIT it
+vim pyproject.toml && git commit -m "Bump version to X.Y.Z" pyproject.toml
 
 # 2. Verify credentials
 make login
 
-# 3. Build and publish conda package
-make conda
+# 3. Create and push the git tag -- BEFORE the image, see below
+make tag
 
-# 4. Build and push Docker image
+# 4. Build and push the Docker image
 make docker
 
-# 5. Create and push git tag
-make tag
+# 5. VERIFY the image by RUNNING it (not optional)
+#    docker run --rm ghcr.io/nboley/fragments-h5:X.Y.Z build-fragments-h5 --help
 
 # 6. Clean up
 make clean
 ```
 
-**Or use all-in-one:**
+**Tag before docker.** `docker-build` bakes `BUILD_CODE_REVISION` from
+`git describe --tags --always --dirty`. Build first and an image labelled `X.Y.Z`
+self-reports `v<prev>-N-g<sha>` — the artifact disagrees with its own label, which is the
+v2.10.1 failure. `make all` orders this correctly. `RELEASE.md` instructed the wrong order
+until 2026-10-07.
+
+**Or use all-in-one** (`login tag docker clean`):
 ```bash
 make all
 ```
 
 ### 10.3 Publishing Targets
 
-**Conda:**
-- **Target:** JFrog Artifactory (`karius.jfrog.io/artifactory/karius-conda`)
-- **Credentials:** Environment variables or pip.conf
-  - `ARTIFACTORY_HOST`, `ARTIFACTORY_USER`, `ARTIFACTORY_TOKEN`
-- **Script:** `scripts/publish_conda_package.sh`
+**Conda:** retired 2026-10-07. Was JFrog Artifactory
+(`karius.jfrog.io/artifactory/karius-conda`) via `scripts/publish_conda_package.sh`. No
+longer published; the targets are deleted.
 
 **Docker:**
 - **Target:** GitHub Container Registry (`ghcr.io/nboley/fragments-h5`)
-- **Auth:** GitHub CLI (`gh auth login`)
-- **Tags:** `2.6.0` and `latest`
+- **Auth:** GitHub CLI (`gh auth login`); `docker-push` pipes `gh auth token` to
+  `docker login`
+- **Tags:** `$(VERSION)` from `pyproject.toml`, plus `latest`
 
 **Git:**
-- **Tag Format:** `v2.7.1`
+- **Tag Format:** `v$(VERSION)`, e.g. `v2.15.0`
 - **Remote:** `origin`
 
 ---
@@ -1093,12 +1090,19 @@ pytest tests/test_fragments_h5.py::test_new_feature -v
 
 ### 13.3 Pre-Release Checklist
 
-- [ ] Update version in `pyproject.toml` (the only place it is declared)
-- [ ] Update `RELEASE.md` if needed
-- [ ] Run full test suite: `pytest tests/`
-- [ ] Test conda build: `make conda-build`
+- [ ] Update version in `pyproject.toml` (the only place that *owns* it) **and** the two
+      hand-copied `**Version:**` lines in this file and `RELEASE.md`'s "Current Version"
+      line. Those three copies rot — `RELEASE.md` sat at `2.12.1` from before v2.13.0
+      until v2.15.0
+- [ ] Add a `RELEASE.md` changelog entry
+- [ ] Run full test suite: `PYTHONPATH=$PWD/src python -m pytest tests/ -q --timeout=1200`
+      (`pytest.ini`'s 300 s default is too low on a loaded shared host, and a timeout kill
+      destroys the pass/fail summary)
+- [ ] Commit the version bump — `tag` refuses to run while `pyproject.toml` is dirty
+- [ ] `make tag` **before** `make docker`, so the baked revision matches the tag
 - [ ] Test Docker build: `make docker-build`
 - [ ] Test CLI: `build-fragments-h5 tests/data/small.chr6.bam test.h5`
+- [ ] **Verify the released image by RUNNING a fresh pull**, not by reading the tag
 - [ ] Update `AGENT_CONTEXT.md` (this file) if architecture changed
 
 ---
@@ -1147,11 +1151,8 @@ pytest tests/test_fragments_h5.py::test_new_feature -v
 ### 15.2 Key Commands
 
 ```bash
-# Build conda package
-make conda-build
-
-# Publish conda package
-make conda-publish
+# Create + push the git tag (do this BEFORE building the image)
+make tag
 
 # Build Docker image
 make docker-build
@@ -1159,8 +1160,8 @@ make docker-build
 # Push Docker image
 make docker-push
 
-# Run tests
-pytest tests/
+# Run tests (300s default in pytest.ini is too low on a loaded shared host)
+PYTHONPATH=$PWD/src python -m pytest tests/ -q --timeout=1200
 
 # Build from source
 python setup.py build_ext --inplace

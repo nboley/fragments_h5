@@ -1,14 +1,21 @@
 # fragments-h5 Makefile
 #
 # Usage:
-#   make conda-build    # Build conda package
-#   make conda          # Build and upload conda package
 #   make docker-build   # Build Docker image
 #   make docker-push    # Push Docker image to GHCR
 #   make docker         # Build and push Docker image
 #   make tag            # Create and push git tag
-#   make all            # Build/upload conda, tag repo, build/push docker
+#   make all            # Tag repo, then build/push docker
 #   make clean          # Remove build artifacts
+#
+# TAG BEFORE DOCKER. docker-build bakes BUILD_CODE_REVISION from
+# `git describe --tags --always --dirty`. Build before tagging and an image
+# LABELLED with the new version self-reports `v<prev>-N-g<sha>` instead -- an
+# artifact disagreeing with its own label, which is what happened with v2.10.1.
+# `all` orders this correctly; do not reorder it.
+#
+# Conda packaging was retired 2026-10-07. The targets are gone rather than left
+# broken, so nothing advertises machinery that no longer runs.
 #
 # Configuration (override with environment variables):
 #   GITHUB_USER    - GitHub username/org (default: nboley)
@@ -20,22 +27,19 @@ VERSION ?= $(shell grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)
 IMAGE_NAME = fragments-h5
 GHCR_IMAGE = ghcr.io/$(GITHUB_USER)/$(IMAGE_NAME)
 
-.PHONY: all login conda-login docker-login require-clean-tree check-pyproject-clean conda-build conda-publish conda docker-build docker-push docker tag clean help
+.PHONY: all login docker-login require-clean-tree check-pyproject-clean docker-build docker-push docker tag clean help
 
 help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Targets:"
-	@echo "  login         Verify credentials for conda and docker"
-	@echo "  conda-login   Verify JFrog credentials for conda publishing"
+	@echo "  login         Verify GitHub authentication for GHCR"
 	@echo "  docker-login  Verify GitHub authentication for GHCR"
-	@echo "  conda-build   Build conda package with rattler-build"
-	@echo "  conda         Build and publish conda package"
 	@echo "  docker-build  Build Docker image"
 	@echo "  docker-push   Push Docker image to GHCR"
 	@echo "  docker        Build and push Docker image"
 	@echo "  tag           Create and push git tag v\$$VERSION"
-	@echo "  all           Build/upload conda, tag repo, build/push docker"
+	@echo "  all           Tag repo, then build/push docker (tag must come first)"
 	@echo "  clean         Remove build artifacts"
 	@echo ""
 	@echo "Configuration:"
@@ -43,14 +47,19 @@ help:
 	@echo "  VERSION=$(VERSION)"
 	@echo "  GHCR_IMAGE=$(GHCR_IMAGE)"
 
-all: login tag conda docker clean
+all: login tag docker clean
+	@# `tag` precedes `docker` deliberately -- see the header comment. Reordering
+	@# these makes the image's baked revision disagree with its own tag.
 	@echo ""
 	@echo "========================================"
 	@echo "Release $(VERSION) complete!"
 	@echo "  ✓ Git tagged: v$(VERSION)"
-	@echo "  ✓ Conda package built and published"
 	@echo "  ✓ Docker pushed: $(GHCR_IMAGE):$(VERSION)"
 	@echo "  ✓ Build artifacts cleaned"
+	@echo "========================================"
+	@echo "NOT done for you: verify the image by RUNNING it."
+	@echo "  docker run --rm $(GHCR_IMAGE):$(VERSION) build-fragments-h5 --help"
+	@echo "A tag is a label, not evidence of what a container contains."
 	@echo "========================================"
 
 docker-login:
@@ -65,14 +74,18 @@ docker-login:
 	fi
 	@echo "✓ GitHub CLI authenticated"
 
-login: conda-login docker-login
+login: docker-login
+	@# Was `login: conda-login docker-login`, but no `conda-login` rule ever existed.
+	@# Make treats an unimplemented .PHONY prerequisite as satisfied, so this silently
+	@# skipped the conda half and still printed "All credentials verified" -- a success
+	@# message for a check that never ran. GHCR is now the only credential needed.
 	@echo ""
-	@echo "✓ All credentials verified successfully!"
+	@echo "✓ GHCR credentials verified successfully!"
 	@echo ""
 
 require-clean-tree:
 	@# Whole-tree cleanliness gate for anything that produces a distributable
-	@# artifact (git tag, conda package, Docker image). Tracked changes
+	@# artifact (git tag, Docker image). Tracked changes
 	@# (staged or unstaged) and untracked files all disqualify. This is what
 	@# prevents an artifact from disagreeing with the commit it claims to be
 	@# built from -- the root cause of the v2.10.1 image/tag mismatch.
@@ -86,27 +99,6 @@ require-clean-tree:
 		echo "  Add them to .gitignore or remove them first."; \
 		exit 1; \
 	fi
-
-conda-build: require-clean-tree
-	@echo "Building conda package with rattler-build..."
-	@rattler-build build \
-		--recipe conda-recipe/recipe.yaml \
-		--output-dir conda-build-output \
-		--channel conda-forge \
-		--channel bioconda \
-		--variant-config conda-recipe/variant_config.yaml \
-		--variant pkg_version=$(VERSION); \
-	BUILD_EXIT=$$?; \
-	if [ $$BUILD_EXIT -ne 0 ] && { [ ! -d conda-build-output ] || [ -z "$$(find conda-build-output -name '*.conda' 2>/dev/null)" ]; }; then \
-		echo "❌ Error: Conda build failed (exit code $$BUILD_EXIT)"; \
-		exit $$BUILD_EXIT; \
-	elif [ $$BUILD_EXIT -ne 0 ]; then \
-		echo "⚠️  Warning: Build succeeded but cleanup failed (exit code $$BUILD_EXIT) - this is a known rattler-build issue"; \
-	fi
-	@echo "Conda package built: conda-build-output/"
-
-conda: conda-build
-	@echo "Conda package built successfully!"
 
 docker-build: require-clean-tree
 	@echo "Building Docker image $(IMAGE_NAME):$(VERSION)..."
@@ -157,7 +149,6 @@ tag: check-pyproject-clean require-clean-tree
 	@echo "Tagged: v$(VERSION)"
 
 clean:
-	rm -rf conda-build-output/
 	rm -rf build/
 	rm -rf dist/
 	rm -rf *.egg-info/
