@@ -191,13 +191,6 @@ fragments_h5/
 │   ├── test_docker_build.py    # Manual Docker test
 │   └── specialized/            # Standalone comparison/integration tests
 │       └── compare_chunked_vs_unchunked.py  # Chunked vs unchunked + Docker comparison
-├── scripts/
-│   ├── build_conda_package.sh
-│   └── publish_conda_package.sh
-├── conda-recipe/               # rattler-build conda package
-│   ├── recipe.yaml
-│   ├── variant_config.yaml
-│   └── conda_build_config.yaml
 ├── docs/
 │   ├── architecture/
 │   │   ├── build_version_provenance_correctness.md
@@ -396,9 +389,16 @@ Conda packaging is no longer used. The `conda-build` / `conda` / `conda-login` M
 targets are deleted, and the conda sections of `RELEASE.md` are gone. Docker + git tag are
 the only release artifacts.
 
-`conda-recipe/` and `scripts/{build,publish}_conda_package.sh` may still be on disk; they
-are unreferenced. `rattler-build` is not installed on the dev host, so these could not run
-even before retirement — the v2.14.0 release skipped conda for that reason.
+`conda-recipe/` (3 files) and `scripts/{build,publish}_conda_package.sh` were **deleted**
+2026-10-07; `scripts/` is gone entirely, as it held nothing else. Recoverable from git
+history if conda packaging is ever revived. `rattler-build` is not installed on the dev
+host, so these could not run even before retirement — the v2.14.0 release skipped conda for
+that reason.
+
+**Not affected, do not confuse the two:** the `Dockerfile` uses **micromamba/conda as the
+runtime environment manager inside the image** (`COPY --from=builder /opt/conda /opt/conda`).
+That is unrelated to conda *packaging* and must stay. Retiring conda meant retiring
+publishing, not the container's environment.
 
 Two defects were found in the release machinery while retiring this (both now fixed):
 `login` depended on a `conda-login` target that **never existed**, and because make treats
@@ -849,7 +849,7 @@ make all
 
 **Conda:** retired 2026-10-07. Was JFrog Artifactory
 (`karius.jfrog.io/artifactory/karius-conda`) via `scripts/publish_conda_package.sh`. No
-longer published; the targets are deleted.
+longer published; the Makefile targets, the recipe and that script are all deleted.
 
 **Docker:**
 - **Target:** GitHub Container Registry (`ghcr.io/nboley/fragments-h5`)
@@ -1142,7 +1142,6 @@ pytest tests/test_fragments_h5.py::test_new_feature -v
 | Core logic | `src/fragments_h5/fragments_h5.py` |
 | Fragment class | `src/fragments_h5/fragment.py` |
 | Cython extension | `src/fragments_h5/sequence.pyx` |
-| Conda recipe | `conda-recipe/recipe.yaml` |
 | Docker | `Dockerfile` |
 | Build automation | `Makefile` |
 | Package metadata | `pyproject.toml` |

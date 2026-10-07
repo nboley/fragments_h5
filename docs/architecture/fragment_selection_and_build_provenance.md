@@ -117,7 +117,8 @@ No new worker-tuple element.
 **Correction to a widely repeated claim: this does not silently wrap in any
 deployed environment.** numpy >= 1.24 raises `OverflowError` on out-of-range
 integer assignment; numpy < 1.24 wrapped with a `DeprecationWarning`.
-`conda-recipe/recipe.yaml` pins `numpy >=1.26` in both `host:` and `run:`, and
+`conda-recipe/recipe.yaml` (deleted 2026-10-07 with conda retirement — see the note further
+down) pins `numpy >=1.26` in both `host:` and `run:`, and
 `environment.yml` (used by the Docker image) leaves numpy unpinned so it resolves
 to current. `pyproject.toml` also leaves it unpinned. **Silent wraparound is
 reachable only through a pip install into a pre-1.24 numpy environment.**
@@ -293,6 +294,15 @@ and to `bam_to_fragments`. That is a real design decision, not a cleanup, and it
 Previously flagged as optional; it is now in scope. The explicit check makes the
 numpy version irrelevant for this specific field, but a floor closes the last path
 by which any out-of-range assignment in this codebase could wrap instead of raise.
+
+> **Note added 2026-10-07:** `conda-recipe/` was deleted when conda packaging was
+> retired, so the recipe cited below no longer exists in the working tree. The
+> reasoning is preserved as written because it records *why* the `pyproject.toml`
+> floor was added; retrieve the recipe from git history (`git show
+> 3c64118^:conda-recipe/recipe.yaml`) if you need to check the original pin. The
+> conclusion is unaffected: `pyproject.toml` now carries `numpy>=1.24`, which is the
+> pin that actually governs every install today.
+
 Note what the floor actually repairs: `conda-recipe/recipe.yaml` already pins
 `numpy >=1.26` in both `host:` and `run:`, while `pyproject.toml` and
 `environment.yml` pin nothing. That gap is the entire reason the uint16 failure
