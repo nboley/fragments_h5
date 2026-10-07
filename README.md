@@ -2,44 +2,32 @@
 
 Fragments h5 is a python library that implements a fast and memory efficient method for storing DNA sequencing fragments. It was developed for the analysis of cell-free-DNA fragments using fragmentomics approaches. See this paper for a brief overview of the field: https://www.nature.com/articles/s41416-021-01635-z
 
-## Building Conda Package
-
-Build the conda package using rattler-build (builds for Python 3.13, linux-64 platform):
-
-```bash
-make conda-build
-```
-
-Or manually:
-
-```bash
-rattler-build build \
-    --recipe conda-recipe/recipe.yaml \
-    --output-dir conda-build-output \
-    --channel conda-forge \
-    --channel bioconda \
-    --variant-config conda-recipe/variant_config.yaml
-```
-
 ## Building the Docker image
 
-From the repository root, build the image (version is read from `pyproject.toml`):
+Conda packaging was retired 2026-10-07. Docker and the git tag are the only release
+artifacts. See `RELEASE.md` for the full release procedure.
+
+From the repository root (version is read from `pyproject.toml`):
 
 ```bash
-make docker
+make docker-build   # build locally
+make docker-push    # build, then push to GHCR
+make docker         # both
 ```
 
 This produces `fragments-h5:$(VERSION)` and `fragments-h5:latest`. To override the version:
 
 ```bash
-VERSION=2.4.0 make docker
+VERSION=2.4.0 make docker-build
 ```
 
-To push to GitHub Container Registry (after `make docker`):
+**Tag before you build.** `docker-build` bakes `BUILD_CODE_REVISION` from
+`git describe --tags --always --dirty`, so building before `make tag` stamps the *previous*
+release into an image labelled with the new one. `make all` orders this correctly. After
+releasing, verify by **running** the image rather than trusting its tag — see the
+Verification section of `RELEASE.md`.
 
-```bash
-make push
-```
+There is no `make push` target; earlier versions of this file said there was.
 
 ## Quick Start
 
@@ -488,3 +476,77 @@ max frag len is 511 and return mapqs and gc:
 WGS: Execution time: 3.130281925201416
 Capture: Execution time: 5.176678895950317
 ```
+
+## Future work
+
+Two related open items, both concerning the four `has_*` properties
+(`has_methyl`, `has_strand`, `has_gc`, `has_fragment_end_clipped`). Recorded here because
+the second is a live correctness hazard, not merely a wish.
+
+### 1. Write the `has_*` answers as h5 attributes at build time
+
+**Today** these answers are derived at read time by walking every `data/{contig}/` group and
+testing dataset membership. As of v2.15.0 each is a `functools.cached_property`, so the walk
+happens at most once per open handle instead of once per access — but it still happens. On a
+195-contig file, resolving `has_methyl` costs 195 group lookups plus 195 membership tests.
+
+**Proposal:** have the builder write four root-level attributes (e.g. `_has_methyl`). It
+already knows the answers: `read_gc`, `read_strand`, `read_methyl` and
+`store_fragment_end_clipped` are global flags applied uniformly to every contig via
+`SubBuildArgs`. Reading would become an attribute lookup — no walk, and no caching needed,
+so the properties could revert to plain `property`.
+
+**The speedup is the lesser benefit.** The real gain is that it forces the question in item 2
+to be answered at *write* time, by the component that knows what it did, instead of being
+guessed at read time.
+
+**Why this is not done yet.** It is a format change, and this repo's experience is that h5
+files outlive and outnumber assumptions about them — a past audit found ~4,540 files across
+two buckets with 1,689 still carrying a known defect. Specifically:
+
+- Files written before the change have no attributes, so the read-time walk must remain as a
+  permanent second code path.
+- The `has_strand` legacy check (`len(shape) == 1`, for files that stored strand in two bits)
+  describes a layout the builder can no longer produce. An attribute cannot describe those
+  files retroactively.
+- An attribute can disagree with the datasets it claims to describe. Any tool that adds or
+  removes a per-contig dataset — `repair-fragments-h5-gc` does both — must update it, or the
+  file will lie about its own contents. A file that misreports itself is worse than a slow
+  but truthful scan.
+
+Needs a design doc covering the migration path and the attribute/dataset consistency
+guarantee before implementation.
+
+### 2. Decide what `has_*` should mean for a non-uniform file — LIVE HAZARD
+
+All four properties use `any()` across contigs. A file carrying a dataset on *some* contigs
+but not others therefore reports `True`, and a consumer that then iterates every contig gets
+a `KeyError`. See `AGENT_CONTEXT.md` §7.3. **This is live and unfixed.**
+
+It is reachable from ordinary use, not a theoretical edge: `fetch_array` defaults
+`return_methyl=self.has_methyl` and `return_fragment_end_clipped=self.has_fragment_end_clipped`,
+and at least one downstream consumer defaults `return_gc` to `fragments_h5.has_gc`. No caller
+has to opt in for this to fire.
+
+The v2.15.0 caching work neither caused nor worsened this — the answer is identical, merely
+computed once — and the current behaviour is now pinned by
+`test_has_properties_use_any_not_all_semantics` against a deliberately non-uniform fixture.
+That test pins the behaviour; it does not endorse it. Changing the semantics now requires a
+deliberate test change rather than happening by accident.
+
+**There are three candidate semantics, not two:**
+
+| Option | Behaviour | Cost |
+|--------|-----------|------|
+| `any()` (today) | optimistic | a consumer iterating all contigs hits `KeyError` |
+| `all()` | conservative | silently drops data that is present on most contigs |
+| raise on non-uniformity | refuses to answer | callers must handle a new error |
+
+Both booleans hide the actual condition from the caller, which argues for the third.
+
+**Answer this first:** does a non-uniform file actually exist in production? No test fixture
+had one until `non_uniform_h5_path` was forged with raw h5py specifically to test this. The
+builder cannot produce one, so such a file could only arise from partial repair, manual
+surgery, or an interrupted write. Probing the fleet for per-contig dataset presence decides
+whether this is urgent or merely latent — and that determines which option above is worth
+the migration.
