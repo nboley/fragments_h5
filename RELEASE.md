@@ -13,9 +13,66 @@ This guide explains how to build and push Docker images and packages after makin
 
 ## Current Version
 
-The version is automatically read from `pyproject.toml` (currently **2.12.1**).
+The version is automatically read from `pyproject.toml` (currently **2.15.0**).
+
+This line was stale at **2.12.1** through the v2.13.0–v2.14.0 releases. It is a hand-edited
+duplicate of a value that `pyproject.toml` already owns, so it rots silently. Treat
+`pyproject.toml` as the only source of truth and verify after tagging with
+`git show v<VERSION>:pyproject.toml | grep '^version'`.
 
 ## Changelog
+
+### v2.15.0 (2026-10-07)
+
+**Changed:**
+- `FragmentsH5.has_methyl`, `has_strand`, `has_gc` and `has_fragment_end_clipped` are now
+  `functools.cached_property` instead of `property`. Each answer is computed at most once
+  per open handle. The `any(...)` bodies are byte-identical, so **what every property
+  returns for every file is unchanged**. Production diff is one import plus four decorator
+  lines.
+- **One observable behaviour change, and the reason this is a minor and not a patch
+  bump:** on a *closed* handle, an answer that was already computed now returns instead of
+  raising. Pre-change all four raised `ValueError: Invalid group (or file) id` (measured
+  directly). An answer that was never computed still raises. This is a strict relaxation —
+  nothing that previously succeeded now fails — and matches `contig_lengths`,
+  `max_fragment_length` and `n_fragments`, which were already readable after `close()`.
+
+**Performance** (measured on a 497 MB, 195-contig production h5; 300 per-region `chr1`
+fetches; h5py call counts quoted because they do not depend on host load):
+- 300 `fetch_array` calls: **5.49–5.98 s → 1.20–1.33 s**
+- `has_methyl`: **300 calls / 6.369 s cumulative → 1 call / 0.231 s**
+- `Group.__contains__`: **59,700 calls → 1,096**; `Group.__getitem__`: **61,500 → 2,896**
+- `read_direct` (the actual data read) unchanged at 900 calls, 0.607 → 0.580 s, and is now
+  the dominant cost, as it should be
+- `fetch_array` consults `has_methyl` and `has_fragment_end_clipped` on every call, because
+  their `return_*` arguments default to `None` meaning "ask the file" — that is why a caller
+  doing per-region fetches previously paid a full per-contig scan per region.
+
+**Rejected on measurement — do not reintroduce:** an eager single-pass scan in `__init__`.
+It looks tidier and is slower. A combined pass must resolve the worst-case flag, which
+destroys the per-flag short-circuit that `has_gc`/`has_strand`/`has_fragment_end_clipped`
+rely on (true at contig #1), because `has_methyl` is typically false and walks every contig.
+Measured: open cost **20 ms → 256 ms**, and `open + has_gc only` **41 ms → 256 ms**, on a
+195-contig file. Lazy per-flag caching strictly dominates it in every scenario measured.
+
+**Testing:** suite **191 → 212 passed** / 3 skipped. The implementation never changed after
+the first commit; the tests were wrong three times. Five mutants survived successive
+versions of the suite and were each found by *execution*, not review — `has_methyl` hardcoded
+false; `has_strand` hardcoded true; dropping only the legacy `len(shape) == 1` strand guard;
+`any()` → `all()` on all four; and `any(...)` → `any([...])`, which returns the identical
+value for every file while visiting every contig and so silently removes the short-circuit.
+Root cause each time was fixture coverage, not assertion logic: no fixture disagreed with
+the mutant. Four fixtures were added to force disagreement (`methyl_h5_path` via the `YM`
+tag, `no_strand_h5_path`, `two_bit_strand_h5_path` and `non_uniform_h5_path`, the last two
+forged with raw h5py because the builder cannot emit those layouts), plus per-flag
+`*_differs_between_fixtures` guards and a first-scan cost assertion.
+
+**Known and unchanged:** the `any()` semantics remain a live hazard — a file carrying a
+dataset on some contigs but not others reports `True`, and a consumer that then iterates
+every contig gets a `KeyError` (see `AGENT_CONTEXT.md` §7.3). Caching did not cause or
+worsen this; the answer is identical, merely computed once. The behaviour is now pinned by
+`test_has_properties_use_any_not_all_semantics`, so changing it to `all()` requires a
+deliberate test change rather than happening by accident.
 
 ### v2.11.0 (unreleased)
 

@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
 **Last Updated:** 2026-10-06
-**Version:** 2.14.0
+**Version:** 2.15.0
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -31,7 +31,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.14.0
+- **Version:** 2.15.0
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), conda (rattler-build), Docker
