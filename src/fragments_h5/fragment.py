@@ -465,10 +465,10 @@ def bam_to_fragments(
     else:
         close_alignment_file = False
 
-    g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
-        fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
-        region_start=fasta_region_start, region_stop=fasta_region_stop
-    )
+    # The GC cumsum is built on the first fragment, so a region with no fragments never
+    # fetches its FASTA. gc_offset is None until then. A fragment that only overlaps
+    # this region from the previous chunk still triggers the load; the caller drops it.
+    g_or_c_cumsum = gc_offset = None
 
     align_iter = bam_to_align(
         alignment_file=alignment_file,
@@ -489,6 +489,11 @@ def bam_to_fragments(
         ):
             continue
 
+        if gc_offset is None:
+            g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
+                fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
+                region_start=fasta_region_start, region_stop=fasta_region_stop
+            )
         if g_or_c_cumsum is None or frag_stop == frag_start:
             gc = None
         else:
@@ -564,10 +569,8 @@ def single_end_bam_to_fragments(
         fasta_chrom=None,
         se_max_fragment_length=None,
     ):
-    g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
-        fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
-        region_start=fasta_region_start, region_stop=fasta_region_stop
-    )
+    # Built lazily on the first fragment; see bam_to_fragments.
+    g_or_c_cumsum = gc_offset = None
 
     with pysam.AlignmentFile(alignment_file) as af:
         if chrom is None:
@@ -600,6 +603,11 @@ def single_end_bam_to_fragments(
                     f"limit and cannot be raised."
                 )
 
+            if gc_offset is None:
+                g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
+                    fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
+                    region_start=fasta_region_start, region_stop=fasta_region_stop
+                )
             if g_or_c_cumsum is None or frag_stop == frag_start:
                 gc = None
             else:
@@ -664,10 +672,8 @@ def tsv_to_fragments(
     **kwargs,
 ) -> Iterator[Fragment]:
     """Yield Fragment objects from a bgzipped+tabix-indexed TSV/BED file."""
-    g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
-        fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
-        region_start=fasta_region_start, region_stop=fasta_region_stop,
-    )
+    # Built lazily on the first fragment; see bam_to_fragments.
+    g_or_c_cumsum = gc_offset = None
 
     skipped = 0
     total = 0
@@ -758,6 +764,11 @@ def tsv_to_fragments(
                 mapq1 = None
                 mapq2 = None
 
+            if gc_offset is None:
+                g_or_c_cumsum, gc_offset = get_g_or_c_cumsum(
+                    fasta_file, fasta_chrom if fasta_chrom is not None else chrom,
+                    region_start=fasta_region_start, region_stop=fasta_region_stop,
+                )
             if g_or_c_cumsum is None or frag_stop == frag_start:
                 gc = None
             else:
