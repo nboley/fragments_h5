@@ -16,7 +16,7 @@ release artifacts.
 
 ## Current Version
 
-The version is automatically read from `pyproject.toml` (currently **2.15.0**).
+The version is automatically read from `pyproject.toml` (currently **2.16.0**).
 
 This line was stale at **2.12.1** through the v2.13.0–v2.14.0 releases. It is a hand-edited
 duplicate of a value that `pyproject.toml` already owns, so it rots silently. Treat
@@ -24,6 +24,32 @@ duplicate of a value that `pyproject.toml` already owns, so it rots silently. Tr
 `git show v<VERSION>:pyproject.toml | grep '^version'`.
 
 ## Changelog
+
+### v2.16.0 (2026-10-08)
+
+**Changed:**
+- `build_fragments_h5` no longer reads the reference for chunks that hold no fragments. The
+  three fragment generators (`bam_to_fragments`, `single_end_bam_to_fragments`,
+  `tsv_to_fragments`) now build the GC cumsum on the first fragment instead of before
+  iterating. **Output is byte-identical:** empty chunks already wrote nothing and were
+  dropped before the merge. Verified on the RD-56804 simulator BED (7/7 datasets) and on
+  `fragments.bam` chr21 (8/8 datasets, 1,626,404 fragments).
+- **One observable behaviour change, and the reason this is a minor and not a patch bump:**
+  a FASTA *fetch* error now surfaces only in a chunk that has a fragment. Opening the FASTA
+  is still eager, so a missing or unreadable file still raises. This is a relaxation —
+  nothing that previously succeeded now fails.
+
+**Performance** (warm page cache; cold could not be measured without root):
+- Sparse input (322 fragments, 1 occupied chunk of chr1's 25): **7.1 s → ~1 s**.
+  `get_g_or_c_cumsum` calls **25 → 1**; it was 89% of the build.
+- Dense input (chr21): no change expected — every chunk is occupied. Wall-clock runs were
+  too noisy to resolve the per-fragment `is None` check (estimated <0.1%); outputs identical.
+- A fragment reaching into the next chunk still makes that chunk load its FASTA (~0.3 s);
+  the caller drops it afterwards.
+
+**Testing:** +6 tests in `tests/test_empty_chunk_skip.py`. They fail on an eager revert, on a
+`not gc_offset` sentinel (a missing FASTA contig returns `(None, 0)` and must count as
+loaded), and on removing GC. Region queries across skipped chunks are checked too.
 
 ### v2.15.0 (2026-10-07)
 

@@ -1,7 +1,7 @@
 # fragments-h5 Agent Context Document
 
-**Last Updated:** 2026-10-06
-**Version:** 2.15.0
+**Last Updated:** 2026-10-08
+**Version:** 2.16.0
 **Project Location:** `/home/nathanboley/src/fragments_h5`  
 **Repository:** https://github.com/nboley/fragments_h5
 
@@ -31,7 +31,7 @@
 
 ### 1.2 Current Status
 
-- **Version:** 2.15.0
+- **Version:** 2.16.0
 - **License:** GPL-3.0-or-later
 - **Python Support:** 3.10+
 - **Build System:** pip (setuptools + Cython), Docker
@@ -104,7 +104,7 @@ Optimization: Use block index to reduce searchsorted range
 **Build Pipeline (Chunk-Based Parallelization, since v2.8.0):**
 1. **Fork:** Uses `fork` start method for minimal overhead (safe because output HDF5 opened after workers complete)
 2. **Per-Worker Temp Dirs:** Each worker gets isolated temp directory for S3 index caching
-3. **Chunk-Based Workers:** Each contig is split into fixed-size genomic chunks (GENOMIC_CHUNK_SIZE = 10M bases). Each chunk is a work unit processed independently. Fragments are assigned to the chunk containing their start position. Workers fetch only the relevant BAM/FASTA region (with MAX_FRAGMENT_LENGTH buffer for GC).
+3. **Chunk-Based Workers:** Each contig is split into fixed-size genomic chunks (GENOMIC_CHUNK_SIZE = 10M bases). Each chunk is a work unit processed independently. Fragments are assigned to the chunk containing their start position. Workers fetch only the relevant BAM/FASTA region (with MAX_FRAGMENT_LENGTH buffer for GC). Since v2.16.0 the FASTA region is fetched and cumsummed lazily, on the chunk's first fragment, so a chunk with no fragments never touches the FASTA. Empty chunks write no sub-h5 and are absent from the merge.
 4. **Main Process Merge:** Chunks are grouped by contig, sorted by chunk_start, and arrays are concatenated to produce the final per-contig datasets.
 5. **Signal Handling:** Workers ignore SIGINT/SIGTERM; main process handles cleanup
 6. **Skip Chunking:** `--skip-chunking` flag reverts to whole-contig processing (each contig = one work unit)
